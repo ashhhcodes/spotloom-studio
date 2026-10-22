@@ -1,0 +1,63 @@
+# Project Progress / LLM Handoff
+
+- Current milestone: Planning / specification review
+- Current status: No application code implemented yet
+- Last updated: 2026-10-22
+
+## Completed
+- [x] Initial product and architecture documentation drafted.
+- [x] Frontend-tool strategy recorded: Codex primary, Grok optional reviewer.
+
+## Current task
+Review and approve `PRD.md`, `ARCHITECTURE.md`, `API_CONTRACTS.md`, and `DESIGN_SYSTEM.md` before implementation.
+
+## Next steps
+1. Resolve open questions in `DECISIONS.md`.
+2. Create the application repository and copy docs into its `docs/` directory.
+3. Initialize frontend/backend skeletons and test/tooling.
+4. Build a render-only vertical slice by Day 4 at the latest.
+
+## Important
+Do not claim the app is implemented. Do not claim tests passed. Update this file after each meaningful milestone with commit SHA, files changed, tests run, exact outcomes, and unresolved issues.
+
+## Milestone 1 update — Renderer proof
+- Date: 2026-10-22
+- Status: Implemented; environment verification incomplete because FFmpeg/FFprobe are not installed or discoverable on PATH in the inspected Windows environment.
+- Workspace: `D:\AdForge_AI` was a plain folder with the existing `docs/` only; Git was not initialized. Git was initialized in this root as requested. Python 3.11.9, Python 3.13.5 and Git 2.54.0 are available. The renderer supports Python 3.11.
+- Added: `.gitignore`, `backend/pyproject.toml`, renderer package, sample input, tests and `backend/README.md`.
+- Verification: `py -3.11 -m venv .venv` succeeded; `.venv\Scripts\python.exe -m pip install --upgrade pip` succeeded (pip 26.2.2); `.venv\Scripts\python.exe -m pip install -e ".\backend[test]"` succeeded; `.venv\Scripts\python.exe -m pytest .\backend\tests -v` reported 10 passed and 1 skipped. `compileall` passed. The skipped test is the real MP4 integration test because FFmpeg and FFprobe are not on PATH. The schema, mocked FFprobe metadata, missing-tool, and partial-output cleanup tests passed. No actual MP4 has been produced or validated in this environment.
+
+### Renderer verification follow-up
+- Date: 2026-10-22
+- Status: Renderer proof verified locally with the real FFmpeg/FFprobe integration test.
+- Toolchain: FFmpeg and FFprobe 9.0.2 were found under the existing WinGet user installation. The Codex PowerShell process did not inherit the user PATH entry, so the existing `bin` directory was prepended to the process-local PATH for verification; no persistent environment setting was changed. Python 3.11.9 and the existing `.venv` were used.
+- Render command: `python -m adforge_renderer.cli --input .\backend\sample_business.json --output .\artifacts\northstar-coffee.mp4`
+- Artifact: `D:\AdForge_AI\artifacts\northstar-coffee.mp4`, 996,237 bytes. Independent FFprobe output: MP4 (`mov,mp4,m4a,3gp,3g2,mj2`), H.264 video, 1080×1920, 7.708333 seconds.
+- Tests: `.\.venv\Scripts\python.exe -m pytest .\backend\tests -v` completed with 11 passed and 0 skipped; `compileall` passed. The real render integration test ran and passed. An invalid-input CLI check exited 1 and created no output. Existing mocked render-failure test passed and confirms partial-output cleanup.
+- Visual review: extracted and inspected frames at 1.0s, 3.9s and 6.6s. Business name, product/service, both sample selling points, brand styling and CTA were visible and legible. Inspection exposed that the middle scene repeated the second selling point; the scene selection was corrected to use the first point, then the MP4 and all tests were rerun successfully.
+- Git/artifact check: `.venv`, Python caches, editable-install metadata and the generated MP4 match `.gitignore` rules. No commit was created. `git status --short` lists only the still-untracked project files (`.gitignore`, `backend/`, `docs/`), as this repository has no initial commit; it does not list the MP4 or runtime files.
+
+## Milestone 2 — Business facts and deterministic creative
+- Date: 2026-10-22
+- Status: Implemented and verified locally. No website extraction, frontend, LLM, database, queue, or deployment work was started.
+- Baseline: before Milestone 2 edits, `.venv\Scripts\Activate.ps1` then `python -m pytest .\backend\tests -v` reported 11 passed, 0 skipped, including the real FFmpeg/FFprobe renderer test.
+- Added: `backend/adforge_renderer/facts.py` (fact/provenance/review model), `creative.py` (creative schema, grounding validator, deterministic generator and renderer adapter), `creative_cli.py`, `backend/sample_business_facts.json`, and `backend/tests/test_creative.py`. Updated `models.py` and `renderer.py` to support zero/one/two/three selling points without repeating or omitting them, while retaining the legacy renderer input shape. Updated `backend/tests/test_renderer.py` and `backend/README.md`.
+- Fact behavior: fields include business name, product/service, selling point, brand color, CTA, address, contact, offer, price, and website. Source provenance distinguishes manual, website, and model suggestion. Review states are unreviewed, approved, and rejected. Corrections reject the old record and create a linked unreviewed revision; a fact's absence has no approval or negative meaning.
+- Creative behavior: deterministic literal-copy scenes carry claim fact IDs. Unsupported, nonexistent, rejected, unreviewed, field-incompatible, and repeated claim references are rejected. Missing/conflicting approved business name, product/service, or CTA returns `needs_review`, with no video. Keyword/exact-copy checks provide traceability, not semantic proof of truth.
+- Final tests: `.\.venv\Scripts\Activate.ps1`, process-local FFmpeg 9.0.2 bin PATH, then `python -m pytest .\backend\tests -v` reported 33 passed, 0 skipped. This includes the original renderer integration test, generated-creative integration with three points, and generated-creative integration with zero points. `python -m compileall -q .\backend\adforge_renderer .\backend\tests` passed.
+- Sample flow: `python -m adforge_renderer.creative_cli --input .\backend\sample_business_facts.json --creative-output .\artifacts\sample_creative.json --output .\artifacts\sample-creative.mp4` succeeded. FFprobe verified MP4/H.264, 1080×1920, 7.708333 seconds. The generated JSON at `artifacts/sample_creative.json` contains five scenes: business-name hook (`business-name`), product value (`product-description`), two supporting points (`selling-point-small-batch`, `selling-point-simple-cup`), and CTA (`call-to-action`). Sample MP4 size: 996,237 bytes.
+- Insufficient-input check: a temporary fact sheet without CTA returned `needs_review`, CLI exit code 2, and did not create an MP4.
+- Git/artifact check: `git status --short` lists only `.gitignore`, `backend/`, and `docs/` as untracked; this repo has no initial commit. `artifacts/`, `.venv/`, pytest/cache/egg-info directories match `.gitignore`. No commit was made; generated sample JSON/video remain ignored local outputs.
+
+## Milestone 3 — Safe website extraction
+- Date: 2026-10-22
+- Status: Implemented and locally verified. Scope is limited to one-page public HTML fetching, robots enforcement, deterministic fact candidates, and a JSON CLI. No frontend, browser automation, LLM, external assets, database, job queue, automatic approval, creative generation, or renderer integration was added.
+- Baseline: with the existing `.venv` and the WinGet FFmpeg 9.0.2 `bin` directory prepended to the PowerShell process PATH, `python -m pytest .\backend\tests -v` reported 33 passed and 0 skipped. `httpx` and BeautifulSoup were not initially installed in the environment.
+- Added: `backend/adforge_renderer/website_scan.py`, `scan_cli.py`, `backend/tests/test_website_scan.py`, and `backend/WEBSITE_EXTRACTION.md`. Updated `backend/pyproject.toml` with pinned HTTPX/BeautifulSoup dependencies and the `adforge-scan` entry point; updated `backend/adforge_renderer/facts.py` with optional bounded provenance evidence and extraction-method fields; updated `backend/README.md` with scan instructions.
+- Policy: only absolute public HTTP(S) URLs without credentials; hostname answers are revalidated before each request and all must be public. Requests disable environment proxies and automatic redirects. Redirects are manually bounded at four and revalidated. Per-request connect/HTTPX timeouts are 3/8 seconds, total scan deadline 20 seconds, and response body limit 1 MB. Only HTML/XHTML page responses are parsed. Robots is fetched first with the same boundary, and disallow, unavailable (including 404), malformed, or cross-origin-redirected policies fail closed. No page subresources are fetched.
+- Limitation: normal HTTPX connection resolution is separate from application DNS validation, leaving a DNS rebinding/time-of-check-to-use gap. This local implementation is not declared safe for public deployment; network egress restrictions or destination-pinning transport are still needed.
+- Extraction: metadata/title/heading business-name precedence; description metadata then first paragraph; literal list items as selling-point candidates; phrase-matched visible CTA; visible email/phone; explicit street-address microdata, price, promotional description, theme/inline colors, and final page URL. Values and candidate counts are bounded/deduplicated. Every candidate has stable hash ID and website source URL, extraction method, bounded evidence, and `unreviewed` state. Existing review/creative tests remain passing.
+- Final verification: installed with `python -m pip install -e ".\backend[test]"`. `python -m pytest .\backend\tests -q` reported **57 passed, 0 failed, 0 skipped**. Scanner security tests use only mocked HTTPX transports and deterministic injected DNS results; no arbitrary public URL was fetched. `python -m compileall -q .\backend\adforge_renderer .\backend\tests` passed. `where.exe ffmpeg` and `where.exe ffprobe` resolved the existing WinGet binaries (version 9.0.2); existing real renderer integration remained active in the full suite.
+- CLI check: `python -m adforge_renderer.scan_cli --help` passed. Documented exit codes are 0 success, 1 partial/no business facts, 2 policy rejection, and 3 unsupported content/fetch or output failure. Mocked CLI coverage verified output JSON and success/partial/policy codes. No live scan sample was run.
+- Git/artifact check: `git status --short` remains `?? .gitignore`, `?? backend/`, and `?? docs/` because the repository has no initial commit. `git check-ignore` confirmed `.venv`, `artifacts`, pytest cache, Python caches, and editable-install metadata are ignored. No secret or generated video was added and no commit was made.
+- Remaining limitation: extraction is conservative and literal; it does not establish that a page statement is true, and JavaScript-rendered pages and sites that do not provide an accessible robots policy are unsupported/blocked. Recommended next step: review the unreviewed scan candidates in a human fact-review workflow before connecting them to the existing creative flow.
