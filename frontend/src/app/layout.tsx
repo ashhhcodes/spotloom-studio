@@ -1,9 +1,10 @@
 import type { Metadata, Viewport } from "next";
+import { StudioShell } from "@/components/studio-shell";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Spotloom Studio — Design foundation",
-  description: "The visual foundation for Spotloom Studio.",
+  title: "Spotloom Studio — Creative workspace",
+  description: "Plan and shape clear campaign work for your business.",
 };
 
 export const viewport: Viewport = {
@@ -16,7 +17,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" data-theme="system">
-      <body>{children}</body>
+      <body><StudioShell>{children}</StudioShell></body>
     </html>
   );
 }
