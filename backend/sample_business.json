@@ -1,0 +1,10 @@
+{
+  "business_name": "Northstar Coffee",
+  "product_or_service": "Small-batch coffee, thoughtfully roasted",
+  "selling_points": [
+    "Roasted in small batches",
+    "A good cup, made simple"
+  ],
+  "brand_colors": ["#D98B45", "#F5EFE7"],
+  "cta": "Find your next cup"
+}
