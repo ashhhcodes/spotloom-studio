@@ -1,0 +1,54 @@
+{
+  "business_id": "northstar-coffee",
+  "facts": [
+    {
+      "fact_id": "business-name",
+      "field": "business_name",
+      "value": "Northstar Coffee",
+      "provenance": {"source": "manual", "note": "Approved local demo input"},
+      "review_state": "approved"
+    },
+    {
+      "fact_id": "product-description",
+      "field": "product_or_service",
+      "value": "Small-batch coffee, thoughtfully roasted",
+      "provenance": {"source": "manual", "note": "Approved local demo input"},
+      "review_state": "approved"
+    },
+    {
+      "fact_id": "selling-point-small-batch",
+      "field": "selling_point",
+      "value": "Roasted in small batches",
+      "provenance": {"source": "manual", "note": "Approved local demo input"},
+      "review_state": "approved"
+    },
+    {
+      "fact_id": "selling-point-simple-cup",
+      "field": "selling_point",
+      "value": "A good cup, made simple",
+      "provenance": {"source": "manual", "note": "Approved local demo input"},
+      "review_state": "approved"
+    },
+    {
+      "fact_id": "brand-color-copper",
+      "field": "brand_color",
+      "value": "#D98B45",
+      "provenance": {"source": "manual", "note": "Approved local demo input"},
+      "review_state": "approved"
+    },
+    {
+      "fact_id": "brand-color-cream",
+      "field": "brand_color",
+      "value": "#F5EFE7",
+      "provenance": {"source": "manual", "note": "Approved local demo input"},
+      "review_state": "approved"
+    },
+    {
+      "fact_id": "call-to-action",
+      "field": "cta",
+      "value": "Find your next cup",
+      "provenance": {"source": "manual", "note": "Approved local demo input"},
+      "review_state": "approved"
+    }
+  ]
+}
