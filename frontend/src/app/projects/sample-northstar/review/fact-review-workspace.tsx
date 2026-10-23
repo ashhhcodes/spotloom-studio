@@ -1,22 +1,8 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-
-type ReviewStatus = "Unreviewed" | "Approved" | "Rejected";
-type DemoFact = {
-  id: string;
-  category: string;
-  claim: string;
-  originalClaim: string;
-  revisions: string[];
-  status: ReviewStatus;
-};
-
-const initialFacts: DemoFact[] = [
-  { id: "product", category: "Product", claim: "Small-batch roasted coffee", originalClaim: "Small-batch roasted coffee", revisions: [], status: "Unreviewed" },
-  { id: "audience", category: "Audience", claim: "People looking for a considered everyday cup", originalClaim: "People looking for a considered everyday cup", revisions: [], status: "Approved" },
-  { id: "message", category: "Possible message", claim: "A good cup, made simple.", originalClaim: "A good cup, made simple.", revisions: [], status: "Rejected" },
-];
+import Link from "next/link";
+import { initialDemoFacts, type DemoFact, type ReviewStatus } from "./demo-facts";
 
 const statuses: ReviewStatus[] = ["Unreviewed", "Approved", "Rejected"];
 const statusDetails: Record<ReviewStatus, { icon: string; className: string }> = {
@@ -26,7 +12,7 @@ const statusDetails: Record<ReviewStatus, { icon: string; className: string }> =
 };
 
 export default function FactReviewWorkspace() {
-  const [facts, setFacts] = useState(initialFacts);
+  const [facts, setFacts] = useState(initialDemoFacts);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
@@ -146,7 +132,7 @@ export default function FactReviewWorkspace() {
 
       <section className="review-next-step" aria-labelledby="next-step-heading">
         <div><p className="review-kicker">What comes next</p><h2 id="next-step-heading">Reviewed facts can guide creative work.</h2><p>Readiness in this demo: {approvedCount} of {facts.length} illustrative claims marked approved. Rejected claims are never counted as approved.</p><p>These sample decisions cannot authorize real creative. Real extraction, evidence review, and a connected backend are required first.</p></div>
-        <div className="review-next-control"><button type="button" disabled aria-describedby="next-step-note">Continue to creative work <span aria-hidden="true">↗</span></button><p id="next-step-note">Unavailable in this frontend-only demo. No creative will be generated.</p></div>
+        <div className="review-next-control"><button type="button" disabled aria-describedby="next-step-note">Continue to creative work <span aria-hidden="true">↗</span></button><p id="next-step-note">Unavailable in this frontend-only demo. No creative will be generated.</p><Link className="review-readiness-link" href="/projects/sample-northstar/creative">See the illustrative readiness details <span aria-hidden="true">↗</span></Link></div>
       </section>
     </>
   );

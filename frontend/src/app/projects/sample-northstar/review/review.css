@@ -71,6 +71,7 @@
 .review-next-control button { width: 100%; min-height: 2.9rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.65rem 0.85rem; border: 1px solid var(--line-strong); background: var(--canvas); color: var(--muted); font: inherit; font-size: 0.78rem; font-weight: 650; }
 .review-next-control button:disabled { cursor: not-allowed; opacity: 0.8; }
 .review-next-control p { margin: 0.45rem 0 0; color: var(--muted); font-size: 0.69rem; }
+.review-readiness-link { display: inline-flex; align-items: center; gap: 0.45rem; margin-top: 0.65rem; color: var(--accent-strong); font-size: 0.74rem; text-underline-offset: 0.2em; }
 .review-footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding-top: 1.2rem; }
 .review-footer p { margin: 0; color: var(--muted); font-size: 0.72rem; }
 .review-footer a { color: var(--accent-strong); font-size: 0.76rem; text-underline-offset: 0.2em; }
