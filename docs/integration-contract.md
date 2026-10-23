@@ -1,18 +1,18 @@
 # Spotloom Studio frontend/backend integration contract
 
-**Status: planning document.** The future API boundaries and examples below are proposals only. The repository currently has no HTTP API implementation.
+**Status: planning document.** The only implemented HTTP route is `GET /health`, a local application liveness check. The future business API boundaries and examples below are proposals only.
 
 ## 1. Purpose and non-goals
 
 This document records the frontend's current domain and the backend's verified local capabilities to guide a future integration milestone. It does not define an implemented API contract.
 
-This phase does not connect the Next.js frontend to Python, add endpoints, transmit data, persist state, enable generation, or change either implementation. The existing CLI commands are not HTTP interfaces and must not be treated as such.
+No business API is implemented. The only route is the local health check described above; it does not connect the Next.js frontend to Python, transmit business data, persist state, or enable generation. The existing CLI commands are not HTTP interfaces and must not be treated as such.
 
 ## 2. Current architecture and verified capabilities
 
 The frontend is a Next.js App Router application. The Northstar route layout wraps its nested pages in `NorthstarDemoProjectProvider` (`frontend/src/app/projects/sample-northstar/layout.tsx`). The provider holds facts, brief, and storyboard scenes in React state (`frontend/src/app/projects/sample-northstar/demo-project-provider.tsx`). This state is shared during client navigation within those routes and resets when the page is refreshed. The production package preview explicitly says no data is sent to a backend (`frontend/src/app/projects/sample-northstar/package/production-package-preview.tsx`, `ProductionPackagePreview`).
 
-The Python package is a local Python 3.11 command-line package with pinned Pydantic, HTTPX, BeautifulSoup, and Pillow dependencies (`backend/pyproject.toml`). Its entry points are `adforge-render` and `adforge-scan`; a separate `creative_cli` module runs generation and rendering. The implementation and tests contain no FastAPI, Flask, Django, Starlette route declarations, ASGI/WSGI application, or HTTP request handler. No backend HTTP route or transport schema is verified in this repository.
+The Python package is a local Python 3.11 package with CLI entry points and a minimal FastAPI application (`backend/pyproject.toml`, `backend/adforge_renderer/api.py`). The app exposes only `GET /health`; it does not expose the CLI workflows or any business operation over HTTP. Its response confirms only that the HTTP app is responding.
 
 Verified local workflows:
 
@@ -41,7 +41,7 @@ The current client eligibility calculation is `getApprovedDemoFacts`, which sele
 
 ## 4. Existing backend interfaces
 
-There is no existing HTTP interface. The following are confirmed local JSON/CLI interfaces only.
+The only existing HTTP interface is `GET /health` (`backend/adforge_renderer/api.py`, `health`); it is not a business API and accepts no business data. The following are confirmed local JSON/CLI interfaces only.
 
 ### Website scan
 
@@ -61,7 +61,7 @@ There is no existing HTTP interface. The following are confirmed local JSON/CLI 
 
 ### Errors and operations
 
-The CLIs report errors on stderr and through process exit codes; there is no HTTP status/error envelope. `scan_website` catches failures into bounded `ScanResult` error codes/messages. The render CLIs catch selected validation, I/O, and renderer errors. No authentication, authorization, job queue, server lifecycle, rate limiting, or remote artifact store is implemented. These characteristics are confirmed in `scan_cli.py`, `creative_cli.py`, `cli.py`, and `website_scan.py`; they are not API guarantees.
+The CLIs report errors on stderr and through process exit codes; there is no HTTP error contract for business operations. `scan_website` catches failures into bounded `ScanResult` error codes/messages. The render CLIs catch selected validation, I/O, and renderer errors. No authentication, authorization, job queue, managed server lifecycle, rate limiting, or remote artifact store is implemented. These characteristics are confirmed in `scan_cli.py`, `creative_cli.py`, `cli.py`, and `website_scan.py`; they are not API guarantees.
 
 ## 5. Frontend/backend compatibility matrix
 
@@ -75,7 +75,7 @@ The CLIs report errors on stderr and through process exit codes; there is no HTT
 | Pre-production readiness findings | **Missing backend equivalent** | `validateNorthstarPreproduction` is frontend-only. Backend has no corresponding unified validator or findings contract. |
 | Deterministic creative generation | **Supported locally, not as a service** | `generate_creative` and `creative_cli` operate on `BusinessFacts` JSON. No HTTP generation endpoint; output schema is not the frontend storyboard. |
 | MP4 rendering | **Supported locally, not as a service** | `render_ad` and CLI produce a local MP4 from `BusinessInput`; fixed output profile/time does not match editable frontend target aspect ratio/runtime. |
-| Persistent projects, jobs, artifacts, auth | **Missing** | No server API, persistence, job model, identity, or artifact download endpoint appears in the backend package. |
+| Persistent projects, jobs, artifacts, auth | **Missing** | No business API, persistence, job model, identity, or artifact download endpoint appears in the backend package. |
 
 ## 6. Proposed future API boundaries
 
@@ -185,7 +185,7 @@ The frontend will need explicit idle/loading/success/partial/blocked/error state
 
 ## 13. Open questions and assumptions
 
-1. What server framework and deployment boundary will host the future API? This repository contains no HTTP application.
+1. What deployment boundary will host the future business API? The current FastAPI application is only a local health-check foundation.
 2. Who can create, view, edit, approve, generate, render, and retrieve a project? What authentication and tenant/ownership model applies?
 3. What persistence, retention, export, and deletion guarantees are required for business facts, source excerpts, briefs, and artifacts?
 4. Should frontend `ProjectFact` map to backend `BusinessFact` directly, or should a versioned API DTO preserve frontend labels and backend provenance separately? How are current text revision arrays mapped to `supersedes_fact_id` lineage?

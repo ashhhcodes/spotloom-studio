@@ -12,6 +12,8 @@ dependencies = [
   "pydantic==2.10.6",
   "httpx==0.28.1",
   "beautifulsoup4==4.13.3",
+  "fastapi==0.115.12",
+  "uvicorn==0.34.0",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +22,7 @@ test = ["pytest==8.3.5"]
 [project.scripts]
 adforge-render = "adforge_renderer.cli:main"
 adforge-scan = "adforge_renderer.scan_cli:main"
+adforge-api = "adforge_renderer.api:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

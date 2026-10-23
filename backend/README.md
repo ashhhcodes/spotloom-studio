@@ -62,6 +62,30 @@ python -m pytest .\backend\tests -v
 
 The metadata/schema/failure tests do not need FFmpeg. The real renderer integration test is skipped if FFmpeg or FFprobe is unavailable.
 
+## Local HTTP API foundation
+
+Install the backend and test dependencies from the project root if needed:
+
+```powershell
+python -m pip install -e ".\backend[test]"
+```
+
+Start the local API explicitly from the project root:
+
+```powershell
+python -m adforge_renderer.api
+```
+
+It binds to `127.0.0.1:8000` by default. Configure a different local loopback address and port with `--host` and `--port`, for example `python -m adforge_renderer.api --host ::1 --port 8123`. Hosts must be `localhost` or a loopback IP, and ports must be from 1 to 65535. The health check is `GET http://127.0.0.1:8000/health` and returns `{"status":"ok"}`. It confirms only that this HTTP application is responding; it does not check external providers or the generation pipeline.
+
+Run the API and existing backend tests with:
+
+```powershell
+python -m pytest .\backend\tests -v
+```
+
+This foundation exposes only `/health`. No business endpoints, frontend integration, persistence, generation, or rendering over HTTP are implemented.
+
 ## Milestone 3: safe website fact scan
 
 Install the project dependencies with the setup command above, then scan one public HTML page. This command only emits a JSON review candidate file; it does not approve facts, generate copy, or render video:
