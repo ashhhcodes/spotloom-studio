@@ -55,6 +55,7 @@
 .readiness-next-actions button { width: 100%; min-height: 2.9rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.65rem 0.85rem; border: 1px solid var(--line-strong); background: var(--canvas); color: var(--muted); font: inherit; font-size: 0.78rem; font-weight: 650; cursor: not-allowed; opacity: 0.82; }
 .readiness-next-actions p { margin: 0.45rem 0 0.9rem; color: var(--muted); font-size: 0.69rem; }
 .readiness-next-actions a { color: var(--accent-strong); font-size: 0.76rem; text-underline-offset: 0.2em; }
+.readiness-action-links { display: flex; flex-wrap: wrap; align-items: center; column-gap: 1.1rem; row-gap: 0.65rem; }
 .readiness-footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding-top: 1rem; }
 .readiness-footer p { margin: 0; color: var(--muted); font-size: 0.72rem; }
 .readiness-footer a { color: var(--accent-strong); font-size: 0.76rem; text-underline-offset: 0.2em; }
