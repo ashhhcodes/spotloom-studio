@@ -6,6 +6,7 @@ import {
   PreproductionApiError,
   requestPreproductionEvaluation,
   toPreproductionRequest,
+  type PreproductionResponse,
 } from "../src/app/projects/sample-northstar/creative/preproduction-api";
 import { northstarDemoProject } from "../src/app/projects/sample-northstar/review/demo-facts";
 import { cloneInitialStoryboard } from "../src/app/projects/sample-northstar/storyboard-model";
@@ -13,8 +14,9 @@ import { cloneInitialStoryboard } from "../src/app/projects/sample-northstar/sto
 const facts = northstarDemoProject.facts;
 const brief = { ...initialNorthstarBrief, reliedUponFactIds: [...initialNorthstarBrief.reliedUponFactIds] };
 const scenes = cloneInitialStoryboard();
+const request = toPreproductionRequest(facts, brief, scenes);
 
-function validResponse() {
+function validResponse(): PreproductionResponse {
   return {
     requestSchemaValid: true,
     evaluationStatus: "evaluated-with-limitations",
@@ -84,13 +86,110 @@ test("the HTTP request serializes exactly the mapped contract to the scoped same
 
 test("successful response is accepted only when contract fields and derived counts agree", async () => {
   const payload = validResponse();
-  assert.equal(isPreproductionResponse(payload), true);
+  assert.equal(isPreproductionResponse(payload, request), true);
   const result = await requestPreproductionEvaluation(
-    toPreproductionRequest(facts, brief, scenes),
+    request,
     async () => new Response(JSON.stringify(payload), { status: 200 }),
   );
   assert.equal(result.factualVerification, "not-performed");
   assert.equal(result.summary.blockerCount, 1);
+});
+
+test("empty storyboard response matches the request with unavailable runtime", async () => {
+  const emptyRequest = toPreproductionRequest(facts, brief, []);
+  const payload = validResponse();
+  payload.storyboardSummary = {
+    sceneCount: 0,
+    plannedRuntimeSeconds: null,
+    targetRuntimeSeconds: brief.duration,
+    runtimeDifferenceSeconds: null,
+    runtimeUnavailableReason: "empty",
+  };
+  assert.equal(isPreproductionResponse(payload, emptyRequest), true);
+  const result = await requestPreproductionEvaluation(emptyRequest, async () => new Response(JSON.stringify(payload)));
+  assert.equal(result.storyboardSummary.plannedRuntimeSeconds, null);
+  assert.equal(result.storyboardSummary.runtimeUnavailableReason, "empty");
+});
+
+test("internally consistent results that disagree with the submitted snapshot are rejected safely", async () => {
+  const mutations = [
+    (payload: ReturnType<typeof validResponse>) => {
+      payload.factSummary.total += 1;
+      payload.factSummary.unreviewed += 1;
+    },
+    (payload: ReturnType<typeof validResponse>) => {
+      payload.factSummary.callerMarkedApproved += 1;
+      payload.factSummary.unreviewed -= 1;
+    },
+    (payload: ReturnType<typeof validResponse>) => {
+      payload.factSummary.rejected -= 1;
+      payload.factSummary.unreviewed += 1;
+    },
+    (payload: ReturnType<typeof validResponse>) => { payload.factSummary.eligibleFactIds = ["product"]; },
+    (payload: ReturnType<typeof validResponse>) => { payload.briefConfirmationSignal = "caller-declared-confirmed"; },
+    (payload: ReturnType<typeof validResponse>) => {
+      payload.storyboardSummary.sceneCount += 1;
+      payload.storyboardSummary.plannedRuntimeSeconds! += 1;
+      payload.storyboardSummary.runtimeDifferenceSeconds! += 1;
+    },
+    (payload: ReturnType<typeof validResponse>) => {
+      payload.storyboardSummary.targetRuntimeSeconds = 30;
+      payload.storyboardSummary.runtimeDifferenceSeconds = payload.storyboardSummary.plannedRuntimeSeconds! - 30;
+    },
+    (payload: ReturnType<typeof validResponse>) => {
+      payload.storyboardSummary.plannedRuntimeSeconds! += 1;
+      payload.storyboardSummary.runtimeDifferenceSeconds! += 1;
+    },
+  ];
+
+  for (const mutate of mutations) {
+    const payload = validResponse();
+    mutate(payload);
+    assert.equal(isPreproductionResponse(payload, request), false);
+    await assert.rejects(
+      requestPreproductionEvaluation(request, async () => new Response(JSON.stringify(payload))),
+      (error: unknown) => error instanceof PreproductionApiError
+        && error.kind === "invalid-response"
+        && error.message.includes("submitted snapshot")
+        && !error.message.includes("secret")
+        && !error.message.includes("<html>"),
+    );
+  }
+});
+
+test("eligible fact IDs retain the submitted fact order", () => {
+  const approvedRequest = toPreproductionRequest(
+    facts.map((fact) => ({ ...fact, status: "approved" as const })),
+    brief,
+    scenes,
+  );
+  const payload = validResponse();
+  payload.factSummary = {
+    total: facts.length,
+    callerMarkedApproved: facts.length,
+    unreviewed: 0,
+    rejected: 0,
+    invalidStatus: 0,
+    eligibleFactIds: approvedRequest.facts.facts.map((fact) => fact.id),
+  };
+  assert.equal(isPreproductionResponse(payload, approvedRequest), true);
+  payload.factSummary.eligibleFactIds.reverse();
+  assert.equal(isPreproductionResponse(payload, approvedRequest), false);
+});
+
+test("a snapshot mismatch can be retried successfully", async () => {
+  let attempts = 0;
+  const fetcher: typeof fetch = async () => {
+    attempts += 1;
+    const payload = validResponse();
+    if (attempts === 1) payload.storyboardSummary.sceneCount += 1;
+    return new Response(JSON.stringify(payload));
+  };
+  await assert.rejects(requestPreproductionEvaluation(request, fetcher), (error: unknown) =>
+    error instanceof PreproductionApiError && error.kind === "invalid-response");
+  const result = await requestPreproductionEvaluation(request, fetcher);
+  assert.equal(attempts, 2);
+  assert.equal(result.storyboardSummary.sceneCount, scenes.length);
 });
 
 test("backend unavailable produces a retryable safe error", async () => {
@@ -123,7 +222,6 @@ test("a failed request can be retried successfully without rebuilding the client
       ? new Response("<internal failure>", { status: 503 })
       : new Response(JSON.stringify(validResponse()), { status: 200 });
   };
-  const request = toPreproductionRequest(facts, brief, scenes);
   await assert.rejects(requestPreproductionEvaluation(request, fetcher), (error: unknown) =>
     error instanceof PreproductionApiError && error.kind === "http" && !error.message.includes("internal failure"));
   const retried = await requestPreproductionEvaluation(request, fetcher);
@@ -166,7 +264,7 @@ test("invalid JSON and malformed 200 responses are not treated as successful eva
 test("malformed backend counts are rejected", () => {
   const payload = validResponse();
   payload.summary.blockerCount = 0;
-  assert.equal(isPreproductionResponse(payload), false);
+  assert.equal(isPreproductionResponse(payload, request), false);
 });
 
 test("invalid and inconsistent response shapes or status combinations fail safely", () => {
@@ -187,5 +285,5 @@ test("invalid and inconsistent response shapes or status combinations fail safel
     { ...baseline, findings: [{ ...baseline.findings[0], unexpected: "field" }] },
   ];
 
-  for (const mutation of mutations) assert.doesNotThrow(() => assert.equal(isPreproductionResponse(mutation), false));
+  for (const mutation of mutations) assert.doesNotThrow(() => assert.equal(isPreproductionResponse(mutation, request), false));
 });

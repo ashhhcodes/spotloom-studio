@@ -110,8 +110,38 @@ function isFinding(value: unknown): value is BackendFinding {
     && (typeof value.affectedSceneId === "string" || value.affectedSceneId === null);
 }
 
-/** Runtime-check the strict backend response before treating it as an evaluation. */
-export function isPreproductionResponse(value: unknown): value is PreproductionResponse {
+function matchesSubmittedSnapshot(response: PreproductionResponse, request: PreproductionRequest): boolean {
+  const submittedFacts = request.facts.facts;
+  const approvedFacts = submittedFacts.filter((fact) => fact.status === "approved");
+  const unreviewedFacts = submittedFacts.filter((fact) => fact.status === "unreviewed");
+  const rejectedFacts = submittedFacts.filter((fact) => fact.status === "rejected");
+  const scenes = request.storyboard.scenes;
+  const validDurations = scenes.every((scene) => Number.isSafeInteger(scene.durationSeconds)
+    && scene.durationSeconds >= 1 && scene.durationSeconds <= 60);
+  if (!validDurations || typeof request.brief.requirementsConfirmed !== "boolean") return false;
+
+  const expectedRuntime = scenes.length === 0
+    ? null
+    : scenes.reduce((total, scene) => total + scene.durationSeconds, 0);
+  const expectedFactSummary = response.factSummary;
+  const storyboard = response.storyboardSummary;
+
+  return expectedFactSummary.total === submittedFacts.length
+    && expectedFactSummary.callerMarkedApproved === approvedFacts.length
+    && expectedFactSummary.unreviewed === unreviewedFacts.length
+    && expectedFactSummary.rejected === rejectedFacts.length
+    && expectedFactSummary.invalidStatus === 0
+    && expectedFactSummary.eligibleFactIds.length === approvedFacts.length
+    && expectedFactSummary.eligibleFactIds.every((id, index) => id === approvedFacts[index]?.id)
+    && response.briefConfirmationSignal === (request.brief.requirementsConfirmed ? "caller-declared-confirmed" : "not-confirmed")
+    && storyboard.sceneCount === scenes.length
+    && storyboard.targetRuntimeSeconds === request.brief.duration
+    && storyboard.plannedRuntimeSeconds === expectedRuntime
+    && storyboard.runtimeUnavailableReason === (scenes.length === 0 ? "empty" : null);
+}
+
+/** Runtime-check the strict backend response and bind derived values to its request snapshot. */
+export function isPreproductionResponse(value: unknown, request: PreproductionRequest): value is PreproductionResponse {
   if (!isRecord(value) || !hasExactKeys(value, [
     "requestSchemaValid", "evaluationStatus", "readinessStatus", "briefConfirmationSignal",
     "factualVerification", "findings", "summary", "factSummary", "storyboardSummary",
@@ -159,7 +189,8 @@ export function isPreproductionResponse(value: unknown): value is PreproductionR
       ? runtime.plannedRuntimeSeconds === null && runtime.runtimeUnavailableReason === "empty"
         && runtime.runtimeDifferenceSeconds === null
       : runtime.plannedRuntimeSeconds !== null && runtime.runtimeUnavailableReason === null
-        && runtime.runtimeDifferenceSeconds === runtime.plannedRuntimeSeconds - runtime.targetRuntimeSeconds);
+        && runtime.runtimeDifferenceSeconds === runtime.plannedRuntimeSeconds - runtime.targetRuntimeSeconds)
+    && matchesSubmittedSnapshot(response, request);
 }
 
 /** Copy only the API's three documented inputs; derived client metrics are never sent. */
@@ -226,8 +257,8 @@ export async function requestPreproductionEvaluation(
     throw new PreproductionApiError("http", `The backend returned HTTP ${response.status}. Retry the evaluation.`, response.status);
   }
 
-  if (!isPreproductionResponse(body)) {
-    throw new PreproductionApiError("invalid-response", "The backend response did not match the supported evaluation contract.", response.status);
+  if (!isPreproductionResponse(body, request)) {
+    throw new PreproductionApiError("invalid-response", "The backend response did not match the submitted snapshot or supported evaluation contract.", response.status);
   }
   return body;
 }
