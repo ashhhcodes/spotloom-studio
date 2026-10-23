@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from "react";
+import Link from "next/link";
 
 type Feedback = { kind: "success" | "error"; message: string };
 
@@ -84,7 +85,7 @@ export function WorkspaceStart() {
         <article className="sample-project">
           <div className="sample-art" aria-hidden="true">N<span>.</span></div>
           <div><small>Sample project · Coffee</small><h3>Northstar Coffee</h3><p>A layout example for a small-batch coffee brand. This is illustrative content.</p></div>
-          <span className="sample-badge">Sample</span>
+          <Link className="sample-badge" href="/projects/sample-northstar" aria-label="View Northstar Coffee sample project">View sample <span aria-hidden="true">↗</span></Link>
         </article>
       </section>
 

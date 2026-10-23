@@ -4,21 +4,33 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
+type WorkspaceSection = "overview" | "projects" | null;
+
 export function StudioNav() {
   const pathname = usePathname();
-  const [projectsActive, setProjectsActive] = useState(false);
+  const [activeSection, setActiveSection] = useState<WorkspaceSection>(null);
 
   useEffect(() => {
-    const syncHash = () => setProjectsActive(window.location.hash === "#projects");
-    syncHash();
-    window.addEventListener("hashchange", syncHash);
-    return () => window.removeEventListener("hashchange", syncHash);
+    const syncLocation = () => {
+      if (window.location.pathname !== "/") {
+        setActiveSection(null);
+      } else {
+        setActiveSection(window.location.hash === "#projects" ? "projects" : "overview");
+      }
+    };
+    syncLocation();
+    window.addEventListener("hashchange", syncLocation);
+    window.addEventListener("popstate", syncLocation);
+    return () => {
+      window.removeEventListener("hashchange", syncLocation);
+      window.removeEventListener("popstate", syncLocation);
+    };
   }, [pathname]);
 
   return (
     <nav className="app-nav" aria-label="Main navigation">
-      <Link href="/" aria-current={pathname === "/" && !projectsActive ? "page" : undefined}>Overview</Link>
-      <Link href="/#projects" aria-current={pathname === "/" && projectsActive ? "location" : undefined}>Projects</Link>
+      <Link href="/#overview" aria-current={activeSection === "overview" ? "location" : undefined}>Overview</Link>
+      <Link href="/#projects" aria-current={activeSection === "projects" ? "location" : undefined}>Projects</Link>
     </nav>
   );
 }
