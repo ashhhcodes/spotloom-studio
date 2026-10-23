@@ -135,11 +135,26 @@ def test_preproduction_validation_returns_schema_result_and_derived_runtime() ->
         response = client.post("/validate/preproduction", json=valid_request())
 
     assert response.status_code == 200
-    assert response.json() == {
-        "valid": True,
-        "issues": [],
+    body = response.json()
+    assert body["requestSchemaValid"] is True
+    assert body["evaluationStatus"] == "evaluated-with-limitations"
+    assert body["readinessStatus"] == "needs-attention"
+    assert body["briefConfirmationSignal"] == "not-confirmed"
+    assert body["factualVerification"] == "not-performed"
+    assert body["storyboardSummary"] == {
+        "sceneCount": 3,
         "plannedRuntimeSeconds": 15,
+        "targetRuntimeSeconds": 15,
+        "runtimeDifferenceSeconds": 0,
+        "runtimeUnavailableReason": None,
     }
+    findings = body["findings"]
+    assert body["summary"] == {
+        "blockerCount": sum(finding["blocksReadiness"] for finding in findings),
+        "warningCount": sum(finding["severity"] == "warning" for finding in findings),
+        "infoCount": sum(finding["severity"] == "info" for finding in findings),
+    }
+    assert "brief.confirmation.required" in {finding["id"] for finding in findings}
 
 
 def test_runtime_is_recomputed_from_submitted_scene_durations() -> None:
@@ -152,7 +167,40 @@ def test_runtime_is_recomputed_from_submitted_scene_durations() -> None:
         response = client.post("/validate/preproduction", json=payload)
 
     assert response.status_code == 200
-    assert response.json()["plannedRuntimeSeconds"] == 62
+    body = response.json()
+    assert body["storyboardSummary"]["plannedRuntimeSeconds"] == 62
+    assert body["storyboardSummary"]["runtimeDifferenceSeconds"] == 47
+    assert "runtime.target-mismatch" in {finding["id"] for finding in body["findings"]}
+
+
+@pytest.mark.parametrize("durations, expected_difference", [([5, 5, 4], -1), ([6, 6, 6], 3)])
+def test_runtime_shorter_or_longer_than_target_emits_warning(durations, expected_difference: int) -> None:
+    payload = valid_request()
+    for scene_value, duration in zip(payload["storyboard"]["scenes"], durations, strict=True):
+        scene_value["durationSeconds"] = duration
+
+    with TestClient(api.app) as client:
+        response = client.post("/validate/preproduction", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["storyboardSummary"]["runtimeDifferenceSeconds"] == expected_difference
+    mismatch = next(finding for finding in body["findings"] if finding["id"] == "runtime.target-mismatch")
+    assert mismatch["severity"] == "warning"
+    assert mismatch["blocksReadiness"] is False
+
+
+def test_exact_runtime_match_does_not_emit_mismatch_finding() -> None:
+    payload = valid_request()
+    payload["brief"]["requirementsConfirmed"] = True
+
+    with TestClient(api.app) as client:
+        response = client.post("/validate/preproduction", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["readinessStatus"] == "ready-for-human-review"
+    assert "runtime.target-mismatch" not in {finding["id"] for finding in body["findings"]}
 
 
 def test_empty_storyboard_is_valid_but_runtime_is_unavailable() -> None:
@@ -163,7 +211,151 @@ def test_empty_storyboard_is_valid_but_runtime_is_unavailable() -> None:
         response = client.post("/validate/preproduction", json=payload)
 
     assert response.status_code == 200
-    assert response.json() == {"valid": True, "issues": [], "plannedRuntimeSeconds": None}
+    body = response.json()
+    assert body["requestSchemaValid"] is True
+    assert body["readinessStatus"] == "needs-attention"
+    assert body["storyboardSummary"]["plannedRuntimeSeconds"] is None
+    assert body["storyboardSummary"]["runtimeUnavailableReason"] == "empty"
+    assert "storyboard.empty" in {finding["id"] for finding in body["findings"]}
+
+
+@pytest.mark.parametrize(
+    "status, expected_severity",
+    [("approved", "info"), ("unreviewed", "warning"), ("rejected", "warning")],
+)
+def test_exact_claim_matches_use_caller_review_status_without_verification(
+    status: str, expected_severity: str,
+) -> None:
+    payload = valid_request()
+    payload["brief"]["requirementsConfirmed"] = True
+    fact = payload["facts"]["facts"][0]
+    fact["status"] = status
+    payload["storyboard"]["scenes"][0]["onScreenText"] = "  SMALL-BATCH   ROASTED COFFEE\n"
+    payload["storyboard"]["scenes"][0]["narration"] = "small-batch roasted coffee"
+
+    with TestClient(api.app) as client:
+        response = client.post("/validate/preproduction", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    match = next(
+        finding for finding in body["findings"]
+        if finding["id"] == "grounding.exact-match.northstar-scene-opening.product"
+    )
+    assert match["severity"] == expected_severity
+    assert match["blocksReadiness"] is False
+    assert match["affectedFactId"] == "product"
+    assert match["affectedSceneId"] == "northstar-scene-opening"
+    assert "on-screen text and narration" in match["explanation"]
+    assert "does not establish truth" in match["explanation"]
+    assert body["factualVerification"] == "not-performed"
+    assert body["factSummary"]["callerMarkedApproved"] == (2 if status == "approved" else 1)
+    assert body["briefConfirmationSignal"] == "caller-declared-confirmed"
+
+
+def test_paraphrases_and_visual_direction_do_not_create_fact_matches() -> None:
+    payload = valid_request()
+    payload["brief"]["requirementsConfirmed"] = True
+    scene_value = payload["storyboard"]["scenes"][0]
+    scene_value["visualDirection"] = "Small-batch roasted coffee"
+    scene_value["onScreenText"] = "Coffee roasted in small batches"
+    scene_value["narration"] = "A thoughtful everyday cup"
+
+    with TestClient(api.app) as client:
+        response = client.post("/validate/preproduction", json=payload)
+
+    assert response.status_code == 200
+    assert not any(
+        finding["category"] == "grounding" and finding["affectedFactId"]
+        for finding in response.json()["findings"]
+    )
+
+
+def test_claim_normalization_matches_javascript_whitespace_rules() -> None:
+    payload = valid_request()
+    payload["brief"]["requirementsConfirmed"] = True
+    payload["storyboard"]["scenes"][0]["onScreenText"] = "\ufeffSmall-batch\u00a0roasted\u3000coffee\ufeff"
+
+    with TestClient(api.app) as client:
+        matches_js_whitespace = client.post("/validate/preproduction", json=payload)
+
+    assert matches_js_whitespace.status_code == 200
+    assert "grounding.exact-match.northstar-scene-opening.product" in {
+        finding["id"] for finding in matches_js_whitespace.json()["findings"]
+    }
+
+    payload["storyboard"]["scenes"][0]["onScreenText"] = "Small-batch\u0085roasted coffee"
+    with TestClient(api.app) as client:
+        does_not_match_js_whitespace = client.post("/validate/preproduction", json=payload)
+
+    assert does_not_match_js_whitespace.status_code == 200
+    assert "grounding.exact-match.northstar-scene-opening.product" not in {
+        finding["id"] for finding in does_not_match_js_whitespace.json()["findings"]
+    }
+
+
+def test_storyboard_content_findings_match_frontend_conditions() -> None:
+    payload = valid_request()
+    payload["brief"]["requirementsConfirmed"] = True
+    scenes = payload["storyboard"]["scenes"]
+    scenes[0]["narrativePurpose"] = "  "
+    scenes[1]["visualDirection"] = ""
+
+    with TestClient(api.app) as client:
+        response = client.post("/validate/preproduction", json=payload)
+
+    assert response.status_code == 200
+    findings = {finding["id"]: finding for finding in response.json()["findings"]}
+    assert findings["storyboard.purpose-missing.northstar-scene-opening"]["blocksReadiness"] is True
+    assert findings["storyboard.visual-direction-missing.northstar-scene-middle"]["blocksReadiness"] is True
+
+
+def test_storyboard_without_any_previewable_content_has_one_content_blocker() -> None:
+    payload = valid_request()
+    payload["brief"]["requirementsConfirmed"] = True
+    for scene_value in payload["storyboard"]["scenes"]:
+        scene_value["visualDirection"] = ""
+        scene_value["onScreenText"] = ""
+        scene_value["narration"] = ""
+
+    with TestClient(api.app) as client:
+        response = client.post("/validate/preproduction", json=payload)
+
+    assert response.status_code == 200
+    findings = response.json()["findings"]
+    assert "storyboard.no-usable-content" in {finding["id"] for finding in findings}
+    assert not any(finding["id"].startswith("storyboard.visual-direction-missing.") for finding in findings)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda fact: fact.pop("source"),
+        lambda fact: fact.update(source={"kind": "website", "reference": "https://user:secret@example.test"}),
+    ],
+)
+def test_missing_or_malformed_provenance_is_a_sanitized_schema_error(mutate) -> None:
+    payload = valid_request()
+    mutate(payload["facts"]["facts"][0])
+
+    with TestClient(api.app) as client:
+        response = client.post("/validate/preproduction", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["requestSchemaValid"] is False
+    assert "secret" not in response.text
+    assert "https://" not in response.text
+
+
+def test_client_supplied_summary_counts_are_not_accepted() -> None:
+    payload = valid_request()
+    payload.update(blockerCount=0, warningCount=0, infoCount=0, eligibleFactIds=["message"])
+
+    with TestClient(api.app) as client:
+        response = client.post("/validate/preproduction", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["requestSchemaValid"] is False
 
 
 @pytest.mark.parametrize(
@@ -184,6 +376,9 @@ def test_schema_issues_are_sanitized_and_change_with_input(payload_mutation, exp
 
     assert response.status_code == 422
     body = response.json()
+    assert body["requestSchemaValid"] is False
+    assert body["evaluationStatus"] == "not-evaluated"
+    assert body["plannedRuntimeSeconds"] is None
     assert body["detail"] == "Request does not match the supported pre-production contract."
     assert any(issue["path"] == expected_path for issue in body["issues"])
     assert all(set(issue) == {"path", "code", "message"} for issue in body["issues"])
@@ -204,6 +399,8 @@ def test_invalid_scene_durations_are_rejected_without_reflecting_values(duration
 
     assert response.status_code == 422
     body = response.json()
+    assert body["requestSchemaValid"] is False
+    assert body["plannedRuntimeSeconds"] is None
     assert any(issue["path"].endswith("durationSeconds") for issue in body["issues"])
     assert all(issue["message"] == "Value does not match the supported contract." for issue in body["issues"])
     assert "input" not in body
@@ -219,7 +416,14 @@ def test_malformed_json_and_missing_required_fields_return_sanitized_422() -> No
         missing = client.post("/validate/preproduction", json={"brief": VALID["brief"]})
 
     assert malformed.status_code == missing.status_code == 422
-    assert malformed.json() == missing.json() == {"detail": "Invalid request body."}
+    expected_error = {
+        "requestSchemaValid": False,
+        "evaluationStatus": "not-evaluated",
+        "detail": "Invalid request body.",
+        "issues": [],
+        "plannedRuntimeSeconds": None,
+    }
+    assert malformed.json() == missing.json() == expected_error
     assert "traceback" not in malformed.text.lower()
     assert str(Path.cwd()) not in missing.text
 
@@ -233,7 +437,8 @@ def test_request_cannot_supply_runtime_or_readiness_as_authoritative() -> None:
         response = client.post("/validate/preproduction", json=payload)
 
     assert response.status_code == 422
-    assert response.json() == {"detail": "Invalid request body."}
+    assert response.json()["requestSchemaValid"] is False
+    assert response.json()["evaluationStatus"] == "not-evaluated"
 
 
 def test_duplicate_scene_ids_and_collection_bounds_are_rejected() -> None:
@@ -255,6 +460,7 @@ def test_duplicate_scene_ids_and_collection_bounds_are_rejected() -> None:
         fact_bound_response = client.post("/validate/preproduction", json=too_many_facts)
 
     assert duplicate_response.status_code == bounded_response.status_code == fact_bound_response.status_code == 422
+    assert duplicate_response.json()["requestSchemaValid"] is False
     assert any(issue["path"] == "storyboard" for issue in duplicate_response.json()["issues"])
     assert any(issue["path"] == "storyboard.scenes" for issue in bounded_response.json()["issues"])
     assert any(issue["path"] == "facts.facts" for issue in fact_bound_response.json()["issues"])
@@ -269,6 +475,9 @@ def test_identical_requests_return_equivalent_results() -> None:
 
     assert first.status_code == second.status_code == 200
     assert first.json() == second.json()
+    assert [finding["id"] for finding in first.json()["findings"]] == [
+        finding["id"] for finding in second.json()["findings"]
+    ]
 
 
 def test_unexpected_errors_are_logged_without_details_or_returned_to_caller(
@@ -284,7 +493,10 @@ def test_unexpected_errors_are_logged_without_details_or_returned_to_caller(
         response = client.post("/validate/preproduction", json=valid_request())
 
     assert response.status_code == 500
-    assert response.json() == {"detail": "Pre-production validation could not be completed."}
+    assert response.json() == {
+        "evaluationStatus": "failed",
+        "detail": "Pre-production validation could not be completed.",
+    }
     assert secret not in response.text
     assert secret not in caplog.text
     assert "RuntimeError" in caplog.text

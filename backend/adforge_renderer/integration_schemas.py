@@ -1,4 +1,4 @@
-"""Typed, side-effect-free schemas for a future frontend/backend contract.
+"""Typed, side-effect-free schemas for the local validation contract.
 
 These models validate structure and bounds only. They do not verify claims,
 authorize review decisions, fetch URLs, or perform generation/rendering work.

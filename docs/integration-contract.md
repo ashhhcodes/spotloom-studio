@@ -90,7 +90,7 @@ The following are verified mapping differences, not silently resolved by these t
 - The shared frontend fixture has `facts` as a list; Python `BusinessClaims` and `validate_contract_input` expect an object containing `{"facts": [...]}`. The Python compatibility test supplies that explicit wrapper. A future adapter must choose the wire shape.
 - Frontend `ProjectFact` uses `id/category/claim/originalClaim/revisions/status/source`; backend `BusinessFact` uses `fact_id/field/value/provenance/review_state/supersedes_fact_id`. The frontend-shaped claim schema is not directly accepted as `BusinessFact`; the test demonstrates that a mapping layer is required. The frontend source type currently permits only `illustrative-placeholder`, while Python's schema additionally accepts `manual`, `website`, and `model_suggestion`. Frontend revision strings do not preserve backend supersession IDs or per-revision provenance.
 - TypeScript types and the demo editor impose no text or collection size caps. Python imposes the limits listed above (including 32 scenes, 20 revisions, 240-character claim text, and bounded brief/scene fields). These are still proposed integration limits and require agreement before UI/backend integration. Python also constrains fact and scene IDs more narrowly than the frontend's `string` declarations.
-- Frontend pre-production validation is stricter than Python structural schema validation in specific places: it blocks `requirementsConfirmed: false`, empty storyboards, and scenes without a narrative purpose. Python intentionally accepts a false confirmation as a boolean and an empty storyboard as structurally valid (with no runtime); its scene schema requires the `narrativePurpose` key but permits an empty string. The frontend readiness function also detects unknown enum values, missing required brief text, duplicate IDs, and invalid durations at runtime; these checks are readiness behavior, not validation performed by TypeScript's erased types.
+- Frontend pre-production validation reports some conditions as readiness findings while Python's structural schemas treat them as valid: `requirementsConfirmed: false`, empty storyboards, and empty narrative purpose. The Phase 6E.2 backend evaluator now emits the corresponding brief-confirmation, empty-storyboard, and missing-purpose findings after schema validation. Python also accepts an empty storyboard structurally but reports its runtime as unavailable. Invalid enum values, missing required brief fields, duplicate IDs, and invalid durations remain schema errors on the API; these readiness-style checks are not performed by TypeScript's erased types.
 - Python rejects extra keys and coercible types. The frontend helper ignores unknown object properties at runtime; compile-time excess-property checking applies only in certain typed literal contexts and is not an input security boundary. The helper's current numeric duration check rejects fractional values, strings, and values outside 1–60.
 
 Automated frontend evidence is limited to the valid fixture's TypeScript assignability and execution of current frontend helper functions from Node after compiling them with the existing compiler. Invalid JSON fixture variants are not typechecked against compile-time types because the frontend has no runtime schema validator; the runtime readiness helper was exercised for the documented mutations. Python Pydantic tests exercise actual runtime acceptance/rejection. These checks do not establish authorization or claim verification. The validation API now accepts the documented Python schema; no frontend/backend network connection exists.
@@ -135,20 +135,63 @@ Automated frontend evidence is limited to the valid fixture's TypeScript assigna
 
 The `facts` wrapper is required because the pure helper validates `BusinessClaims`; its `facts` list may be empty. When supplied, all facts and provenance are caller-provided and are not independently verified. The endpoint does not load the frontend's in-memory state. It accepts `requirementsConfirmed` as a structural boolean only; `false` is valid and `true` is not evidence that the brief is factual. Caller-provided review status is likewise not verification or authorization.
 
-A schema-valid response has exactly this shape (runtime is calculated from all submitted scene durations by `calculate_storyboard_runtime`):
+A schema-valid response uses this shape. This representative response is grounded in the shared Northstar fixture with one fact marked approved in the submitted input, the brief confirmation signal set, and a 15-second scene. Runtime is calculated from every submitted scene duration by `calculate_storyboard_runtime`; findings and counts are recomputed from the request on every call:
 
 ```json
 {
-  "valid": true,
-  "issues": [],
-  "plannedRuntimeSeconds": 15
+  "requestSchemaValid": true,
+  "evaluationStatus": "evaluated-with-limitations",
+  "readinessStatus": "ready-for-human-review",
+  "briefConfirmationSignal": "caller-declared-confirmed",
+  "factualVerification": "not-performed",
+  "findings": [{
+    "id": "grounding.exact-match-limitations",
+    "severity": "info",
+    "category": "grounding",
+    "title": "Claim matching is intentionally limited",
+    "explanation": "Only exact text matches after lowercase conversion and whitespace normalization are associated with facts. Unmatched copy and paraphrases are not analyzed and are not thereby verified or safe.",
+    "resolution": "Manually review all creative text against source evidence; this endpoint does not independently verify supplied sources.",
+    "destinationRoutes": ["/projects/sample-northstar/storyboard", "/projects/sample-northstar/review"],
+    "blocksReadiness": false,
+    "affectedFactId": null,
+    "affectedSceneId": null
+  }, {
+    "id": "production.checks-unavailable",
+    "severity": "info",
+    "category": "production",
+    "title": "Additional production checks are not evaluated",
+    "explanation": "This deterministic evaluation does not independently verify sources or claims, analyze semantic meaning, assess legal or advertising policy, persist data, or generate media.",
+    "resolution": "Treat this result as planning support only; human review remains necessary.",
+    "destinationRoutes": ["/projects/sample-northstar/creative"],
+    "blocksReadiness": false,
+    "affectedFactId": null,
+    "affectedSceneId": null
+  }],
+  "summary": {"blockerCount": 0, "warningCount": 0, "infoCount": 2},
+  "factSummary": {
+    "total": 1,
+    "callerMarkedApproved": 1,
+    "unreviewed": 0,
+    "rejected": 0,
+    "invalidStatus": 0,
+    "eligibleFactIds": ["product"]
+  },
+  "storyboardSummary": {
+    "sceneCount": 1,
+    "plannedRuntimeSeconds": 15,
+    "targetRuntimeSeconds": 15,
+    "runtimeDifferenceSeconds": 0,
+    "runtimeUnavailableReason": null
+  }
 }
 ```
 
-An empty scene list is structurally valid and returns `plannedRuntimeSeconds: null`. Any invalid scene makes the request invalid; no partial runtime is reported. Invalid nested contract data returns HTTP 422 with the existing sanitized issue semantics:
+The example finding and summaries are from the shared Northstar fixture. Finding entries also contain `affectedFactId` and `affectedSceneId` when applicable. An empty scene list is schema-valid, returns a `storyboard.empty` blocker, and has `plannedRuntimeSeconds: null` with `runtimeUnavailableReason: "empty"`. Invalid scene data makes the request schema invalid; no readiness findings are returned and no partial runtime is reported. Invalid nested contract data returns HTTP 422 with the existing sanitized issue semantics:
 
 ```json
 {
+  "requestSchemaValid": false,
+  "evaluationStatus": "not-evaluated",
   "detail": "Request does not match the supported pre-production contract.",
   "issues": [
     {
@@ -156,13 +199,41 @@ An empty scene list is structurally valid and returns `plannedRuntimeSeconds: nu
       "code": "greater_than_equal",
       "message": "Value does not match the supported contract."
     }
-  ]
+  ],
+  "plannedRuntimeSeconds": null
 }
 ```
 
-Malformed JSON, missing top-level fields, wrong top-level types, and unknown top-level fields return HTTP 422 with `{"detail":"Invalid request body."}`. Error responses do not echo submitted values or exception text. Unexpected validation failures are logged only with a fixed event and exception class, and return HTTP 500 with `{"detail":"Pre-production validation could not be completed."}`. `GET /health` is unchanged.
+Malformed JSON, missing top-level fields, wrong top-level types, and unknown top-level fields return HTTP 422 with `requestSchemaValid: false`, `evaluationStatus: "not-evaluated"`, no issue details, and a null runtime. Error responses do not echo submitted values or exception text. Unexpected validation failures are logged only with a fixed event and exception class, and return HTTP 500 with `evaluationStatus: "failed"` and `{"detail":"Pre-production validation could not be completed."}`. `GET /health` is unchanged.
 
-The response intentionally has no severity, suggested action, readiness counters, or readiness status: the existing backend `ValidationIssue` has only `path`, `code`, and a generic safe `message`, and `validate_contract_input` is a structural validator, not a pre-production readiness engine. A 200 response means only that inputs match the documented structural contract. It does not mean the brief is confirmed, facts are approved for factual use, claims are grounded, or an ad is ready. The validator does not cross-check relied-upon fact IDs against supplied facts, compare storyboard runtime to the brief's target duration, or determine whether a claim is factually supported. No client-supplied runtime/readiness field is accepted. No HTTP client, filesystem, subprocess, persistence, scanning, generation, rendering, export, or frontend integration is used.
+`PreproductionFinding` fields are `id`, `severity` (`blocker`, `warning`, `info`), `category` (`brief`, `facts`, `storyboard`, `runtime`, `grounding`, `production`), `title`, `explanation`, `resolution`, `destinationRoutes`, `blocksReadiness`, and nullable affected IDs. The summary's blocker count is derived from `blocksReadiness`; warning and info counts are derived from severity. Finding IDs are deduplicated and ordered by severity, category, affected entity ID, and ID. `readinessStatus` is `needs-attention` if any blocker exists, otherwise `ready-for-human-review`; that status never means production readiness. `evaluationStatus` is always `evaluated-with-limitations` for valid requests. The brief confirmation signal is reported separately as `caller-declared-confirmed` or `not-confirmed`. `factualVerification` is always `not-performed`.
+
+A 200 response means the request matches the structural contract and the supported deterministic rules were evaluated. It does not mean the brief is factually correct, caller-marked approvals are independently reviewed or verified, claims are semantically grounded, or an ad is ready. No client-supplied runtime, readiness, finding, or count is accepted. The endpoint does not cross-check `reliedUponFactIds` against facts or compare scene IDs against a client-supplied fact relationship because no such relationship exists in the models. It associates only exact normalized copy matches in on-screen text and narration, as the frontend does. No HTTP client, filesystem, subprocess, persistence, scanning, generation, rendering, export, or frontend integration is used.
+
+#### Frontend rule mapping and parity limits (Phase 6E.2)
+
+The reference is `frontend/src/app/projects/sample-northstar/preproduction-validation.ts`, with the fact status helpers in `review/demo-facts.ts`, the brief types in `creative-brief.ts`, and scene types/runtime helpers in `storyboard-model.ts`. The backend evaluator is `backend/adforge_renderer/preproduction_validation.py`. This table records where the backend mirrors behavior and where strict request-schema errors take precedence:
+
+| Frontend rule / trigger | Frontend outcome | Backend behavior and parity |
+| --- | --- | --- |
+| Required brief text empty; invalid choices; non-string optional value proposition | Blocker finding with brief destination | These values violate strict Pydantic schemas and return sanitized 422 schema issues; they are not readiness findings. |
+| `requirementsConfirmed` is not `true` | `brief.confirmation.required`, blocker | Same stable ID, blocker, category, and brief destination. Wording is generic because the API cannot know whether inputs were prefilled demo defaults. The output separately labels the value as caller-declared confirmation. |
+| Brief demo-default notice | `brief.demo-defaults`, info | Not emitted: the request has no field proving the values originated as Northstar demo defaults. |
+| Fact ID/status invalid or IDs duplicated | Blocker findings in the frontend’s defensive runtime validator | Strict schema rejects these with 422 before evaluation; valid input therefore has zero invalid statuses. |
+| Unreviewed or rejected fact | Per-fact warning; rejected copy must not be used | Same stable IDs/severity/routes. Finding text says these are caller-supplied states. Neither state establishes truth; approval is only a submitted status. |
+| No approved facts | `facts.none-approved`, warning | Same condition and warning; summary exposes caller-marked counts and eligible IDs, not verified facts. |
+| Empty storyboard | `storyboard.empty`, blocker; runtime unavailable | Same blocker. Runtime is null and unavailable reason is `empty`. |
+| No usable visual direction, on-screen text, or narration across scenes | `storyboard.no-usable-content`, blocker | Same condition, severity, and storyboard route. |
+| Blank narrative purpose | Per-scene blocker | Same finding where the schema permits an empty narrative-purpose string. |
+| Missing visual direction when any scene has previewable content | Per-scene blocker | Same global trigger and per-scene finding. |
+| Blank title, malformed scene, duplicate/invalid IDs, invalid duration | Defensive readiness blockers in frontend | Strict schema errors return 422 instead of a readiness finding. For invalid duration the runtime remains null in the error response. |
+| Runtime differs from target | `runtime.target-mismatch`, warning | Exact comparison: any nonzero difference warns. Frontend defines no tolerance; backend uses zero tolerance and makes no automatic changes. |
+| On-screen text or narration exactly matches a valid fact after trim, ECMAScript-whitespace collapse, and lowercase | Approved match is info; unreviewed/rejected match is warning; affected fact and scene IDs included | Same channels and normalized exact-match rule; no visual-direction, semantic, paraphrase, or unsupported scene-to-fact inference. Caller status controls the label only; matching does not verify truth. |
+| Exact-match limitation notice | `grounding.exact-match-limitations`, info | Same stable ID and limitation. |
+| Demo-only production boundary notice | `production.demo-only-boundary`, info | Adapted to `production.checks-unavailable`, info. API input is not necessarily demo content, so the evaluator does not label the submitted content demo-only. |
+| Findings order/deduplication and counts | Derived; status uses blocker count | Same severity/category/entity ordering, stable IDs and deduplication; all counts are derived from returned findings. |
+
+The backend evaluator only runs after schema validation. Therefore, frontend defensive findings for malformed IDs/statuses, missing required brief fields, invalid brief selections, missing titles, or invalid durations are represented as HTTP 422 issues, not successful evaluation findings. Source provenance is required and structurally validated but not fact-checked. Frontend-specific data limitations also remain: no project-default origin marker, no authenticated reviewer identity, no semantic claim grounding, and no per-scene fact relationship. A caller can submit `requirementsConfirmed: true` or `status: "approved"`; those values are not authenticated, authorized, or treated as factual verification.
 
 ## 5. Frontend/backend compatibility matrix
 
@@ -171,9 +242,9 @@ The response intentionally has no severity, suggested action, readiness counters
 | Submit website URL from browser and receive candidates | **No HTTP support; unsafe to expose currently** | Python `scan_cli` scans a URL and writes a local JSON file. `/scan` is deliberately absent because DNS preflight does not pin HTTPX's connection resolution, there is no deployment egress isolation or service concurrency cap, parsing has no CPU deadline, and raw rejected URLs can be echoed. |
 | Website provenance and extraction limits | **Supported in local backend model** | `BusinessFact`/`FactProvenance` and `extract_facts` capture provenance/evidence. The frontend demo source is an illustrative placeholder, not this backend schema. |
 | Human review and fact corrections | **Partial / incompatible shape** | Backend `BusinessFacts.approve`, `.reject`, and `.correct` model decisions and linked superseding IDs; frontend uses `id/category/claim/revisions[]`. No API maps these shapes or persists review decisions. |
-| Brief editing and confirmation | **Missing backend support** | Frontend `CreativeBrief` has no corresponding backend brief model or CLI input. Backend confirmation semantics are absent. |
+| Brief editing and confirmation | **Validation signal only** | The API validates the brief and reports the caller-submitted confirmation signal; it does not provide editing, persistence, reviewer identity, or authoritative confirmation. |
 | Storyboard editing and scene timing | **Partial / incompatible** | Backend `CreativeScene` supports ordered role, on-screen text, support description, and fact IDs. It has neither the frontend scene schema nor its duration/timing validation. |
-| Pre-production readiness findings | **Structural validation only** | `POST /validate/preproduction` checks the submitted schemas and derives runtime. `validateNorthstarPreproduction` findings, severity, suggested actions, and readiness summaries remain frontend-only; no equivalent backend readiness engine exists. |
+| Pre-production readiness findings | **Supported deterministic subset** | `POST /validate/preproduction` returns supported frontend-aligned findings, derived counts/status, and runtime. Schema-invalid data remains a 422. Project-default origin, semantic grounding, verified evidence, policy review, and other production checks remain unsupported. |
 | Deterministic creative generation | **Supported locally, not as a service** | `generate_creative` and `creative_cli` operate on `BusinessFacts` JSON. No HTTP generation endpoint; output schema is not the frontend storyboard. |
 | MP4 rendering | **Supported locally, not as a service** | `render_ad` and CLI produce a local MP4 from `BusinessInput`; fixed output profile/time does not match editable frontend target aspect ratio/runtime. |
 | Persistent projects, jobs, artifacts, auth | **Missing** | No project-management API, persistence, job model, identity, or artifact download endpoint appears in the backend package. |

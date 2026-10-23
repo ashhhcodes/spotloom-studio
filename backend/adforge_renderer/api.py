@@ -9,11 +9,17 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, StrictStr
 
 from adforge_renderer.integration_schemas import (
+    BusinessClaims,
+    CreativeBrief,
     PreproductionValidationRequest,
+    StoryboardInput,
     validate_contract_input,
+)
+from adforge_renderer.preproduction_validation import (
+    PreproductionValidationResponse,
+    evaluate_preproduction,
 )
 
 
@@ -28,28 +34,18 @@ app = FastAPI(
 )
 
 
-class ValidationIssueResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    path: StrictStr
-    code: StrictStr
-    message: StrictStr
-
-
-class PreproductionValidationResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    valid: StrictBool
-    issues: list[ValidationIssueResponse]
-    plannedRuntimeSeconds: StrictInt | None
-
-
 @app.exception_handler(RequestValidationError)
 async def request_validation_error_handler(
     _request: Request, _error: RequestValidationError,
 ) -> JSONResponse:
     """Return a stable 422 without reflecting submitted values or internal details."""
-    return JSONResponse(status_code=422, content={"detail": "Invalid request body."})
+    return JSONResponse(status_code=422, content={
+        "requestSchemaValid": False,
+        "evaluationStatus": "not-evaluated",
+        "detail": "Invalid request body.",
+        "issues": [],
+        "plannedRuntimeSeconds": None,
+    })
 
 
 @app.get("/health", include_in_schema=False)
@@ -76,24 +72,30 @@ def validate_preproduction(
             return JSONResponse(
                 status_code=422,
                 content={
+                    "requestSchemaValid": False,
+                    "evaluationStatus": "not-evaluated",
                     "detail": "Request does not match the supported pre-production contract.",
                     "issues": [
                         {"path": issue.path, "code": issue.code, "message": issue.message}
                         for issue in result.issues
                     ],
+                    "plannedRuntimeSeconds": None,
                 },
             )
-        return PreproductionValidationResponse(
-            valid=True,
-            issues=[],
-            plannedRuntimeSeconds=result.plannedRuntimeSeconds,
+        return evaluate_preproduction(
+            BusinessClaims.model_validate(payload.facts),
+            CreativeBrief.model_validate(payload.brief),
+            StoryboardInput.model_validate(payload.storyboard),
         )
     except Exception as error:
         # Log only a fixed event and exception class; exception text may contain input.
         logger.error("Pre-production validation failed (%s).", type(error).__name__)
         return JSONResponse(
             status_code=500,
-            content={"detail": "Pre-production validation could not be completed."},
+            content={
+                "evaluationStatus": "failed",
+                "detail": "Pre-production validation could not be completed.",
+            },
         )
 
 
