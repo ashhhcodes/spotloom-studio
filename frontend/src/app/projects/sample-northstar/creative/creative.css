@@ -101,6 +101,31 @@
 .preflight-resolution strong { color: var(--ink-soft); }
 .preflight-destinations { display: flex; flex-wrap: wrap; gap: 0.55rem 1rem; margin-top: 0.65rem; }
 .preflight-destinations a { color: var(--accent-strong); font-size: 0.76rem; font-weight: 650; text-underline-offset: 0.2em; }
+.backend-evaluation { margin-top: 1rem; padding: 1.15rem 1.25rem; border: 1px solid var(--line); background: var(--surface); }
+.backend-evaluation-intro { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 1rem 1.5rem; }
+.backend-evaluation-intro h2, .backend-results h2 { margin: 0; font-family: var(--font-editorial); font-size: clamp(1.35rem, 2.6vw, 1.8rem); font-weight: 400; letter-spacing: -0.035em; }
+.backend-evaluation-intro > div > p:last-child { max-width: 52rem; margin: 0.4rem 0 0; color: var(--ink-soft); font-size: 0.79rem; line-height: 1.5; }
+.backend-evaluation-button { min-height: 2.75rem; padding: 0.65rem 0.95rem; border: 1px solid var(--accent-strong); background: var(--accent-strong); color: var(--canvas); font: inherit; font-size: 0.77rem; font-weight: 700; cursor: pointer; }
+.backend-evaluation-button:hover:not(:disabled) { filter: brightness(0.92); }
+.backend-evaluation-button:disabled { cursor: wait; opacity: 0.72; }
+.backend-evaluation-status { margin: 0.8rem 0 0; color: var(--muted); font-size: 0.74rem; line-height: 1.5; }
+.backend-evaluation-status[role="alert"] { color: var(--danger); }
+.backend-evaluation-issues { display: grid; gap: 0.3rem; margin: 0.55rem 0 0; padding-left: 1.2rem; color: var(--ink-soft); font-size: 0.73rem; }
+.backend-evaluation-issues code { margin-right: 0.4rem; color: var(--accent-strong); }
+.backend-results { margin-top: 1.5rem; padding: 1.15rem 1.25rem; border: 1px solid var(--line-strong); background: var(--surface); }
+.backend-results-stale { border-style: dashed; }
+.backend-results > .readiness-section-heading { align-items: end; }
+.backend-result-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 1rem; border: 1px solid var(--line); }
+.backend-result-facts > div { display: grid; align-content: start; gap: 0.35rem; min-width: 0; padding: 0.8rem; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.backend-result-facts > div:nth-child(3n) { border-right: 0; }
+.backend-result-facts > div:nth-last-child(-n + 3) { border-bottom: 0; }
+.backend-result-facts span { color: var(--muted); font-size: 0.68rem; }
+.backend-result-facts strong { color: var(--ink); font-size: 0.76rem; font-weight: 650; overflow-wrap: anywhere; }
+.backend-result-counts { margin-top: 0.8rem; }
+.backend-result-fact-note { margin: 0.75rem 0 0; color: var(--muted); font-size: 0.73rem; line-height: 1.5; }
+.backend-result-findings { margin: 0.65rem 0 0; padding: 0; list-style: none; }
+.backend-result-findings h3 { margin: 0; color: var(--ink); font-size: 0.86rem; font-weight: 650; }
+.backend-result-findings > li:last-child { border-bottom: 0; }
 @media (max-width: 960px) {
   .preflight-overview { grid-template-columns: minmax(0, 1fr) minmax(15rem, 0.9fr); }
   .preflight-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -113,6 +138,8 @@
   .readiness-next-step { grid-template-columns: 1fr; gap: 1.2rem; }
   .preflight-overview { grid-template-columns: 1fr; }
   .preflight-finding-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .backend-evaluation-intro { grid-template-columns: 1fr; align-items: start; }
+  .backend-evaluation-button { justify-self: start; }
 }
 @media (max-width: 560px) {
   .creative-readiness-page { padding-top: 1.5rem; }
@@ -129,4 +156,9 @@
   .preflight-metrics > div:nth-child(3) { border-right: 1px solid var(--line); }
   .preflight-metrics > div:nth-child(2n) { border-right: 0; }
   .preflight-metrics > div:nth-child(-n + 4) { border-bottom: 1px solid var(--line); }
+  .backend-result-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .backend-result-facts > div:nth-child(3n) { border-right: 1px solid var(--line); }
+  .backend-result-facts > div:nth-child(2n) { border-right: 0; }
+  .backend-result-facts > div:nth-last-child(-n + 3) { border-bottom: 1px solid var(--line); }
+  .backend-result-facts > div:nth-last-child(-n + 2) { border-bottom: 0; }
 }
