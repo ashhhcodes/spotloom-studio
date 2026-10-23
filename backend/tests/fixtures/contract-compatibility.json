@@ -1,0 +1,130 @@
+{
+  "validNorthstar": {
+    "facts": [
+      {
+        "id": "product",
+        "category": "Product",
+        "claim": "Small-batch roasted coffee",
+        "originalClaim": "Small-batch roasted coffee",
+        "revisions": [],
+        "status": "unreviewed",
+        "source": {
+          "kind": "illustrative-placeholder",
+          "reference": "Demo source — no website scanned",
+          "pageOrSection": "Placeholder — no page inspected",
+          "excerpt": null
+        }
+      },
+      {
+        "id": "audience",
+        "category": "Audience",
+        "claim": "People looking for a considered everyday cup",
+        "originalClaim": "People looking for a considered everyday cup",
+        "revisions": [],
+        "status": "approved",
+        "source": {
+          "kind": "illustrative-placeholder",
+          "reference": "Demo source — no website scanned",
+          "pageOrSection": "Placeholder — no page inspected",
+          "excerpt": null
+        }
+      },
+      {
+        "id": "message",
+        "category": "Possible message",
+        "claim": "A good cup, made simple.",
+        "originalClaim": "A good cup, made simple.",
+        "revisions": [],
+        "status": "rejected",
+        "source": {
+          "kind": "illustrative-placeholder",
+          "reference": "Demo source — no website scanned",
+          "pageOrSection": "Placeholder — no page inspected",
+          "excerpt": null
+        }
+      }
+    ],
+    "brief": {
+      "objective": "awareness",
+      "targetAudience": "People looking for a considered everyday cup",
+      "productOrOffer": "Small-batch roasted coffee",
+      "keyMessage": "A good cup, made simple.",
+      "valueProposition": "",
+      "platform": "instagram",
+      "aspectRatio": "9:16",
+      "duration": 15,
+      "tone": "Warm, considered, and clear",
+      "callToAction": "Learn more",
+      "reliedUponFactIds": ["audience", "product", "message"],
+      "requirementsConfirmed": false
+    },
+    "storyboard": {
+      "scenes": [
+        {
+          "id": "northstar-scene-opening",
+          "title": "Set the mood",
+          "narrativePurpose": "Establish a calm, everyday campaign tone.",
+          "visualDirection": "A quiet tabletop comes into view. This is a visual suggestion, not captured footage.",
+          "onScreenText": "A moment to pause",
+          "narration": "Take a moment.",
+          "durationSeconds": 4,
+          "transitionNote": "Fade in, then hold briefly."
+        },
+        {
+          "id": "northstar-scene-middle",
+          "title": "Make room",
+          "narrativePurpose": "Give the central message space to land.",
+          "visualDirection": "An illustrative cup sits beside an open notebook; no real product details are shown.",
+          "onScreenText": "Make space for good.",
+          "narration": "A little room in the day.",
+          "durationSeconds": 6,
+          "transitionNote": "Use a gentle cut between moments."
+        },
+        {
+          "id": "northstar-scene-close",
+          "title": "Close simply",
+          "narrativePurpose": "End with a clear, low-pressure next step.",
+          "visualDirection": "A simple Northstar Coffee demo end card; no logo asset or finished artwork is supplied.",
+          "onScreenText": "Northstar Coffee · Learn more",
+          "narration": "Learn more.",
+          "durationSeconds": 5,
+          "transitionNote": "Hold the end card, then fade out."
+        }
+      ]
+    }
+  },
+  "boundaryDurationScenes": [
+    {
+      "id": "boundary-minimum",
+      "title": "Minimum",
+      "narrativePurpose": "Check the lower duration boundary.",
+      "visualDirection": "Illustrative test direction.",
+      "onScreenText": "",
+      "narration": "",
+      "durationSeconds": 1,
+      "transitionNote": ""
+    },
+    {
+      "id": "boundary-maximum",
+      "title": "Maximum",
+      "narrativePurpose": "Check the upper duration boundary.",
+      "visualDirection": "Illustrative test direction.",
+      "onScreenText": "",
+      "narration": "",
+      "durationSeconds": 60,
+      "transitionNote": ""
+    }
+  ],
+  "mutations": {
+    "invalidDuration": 1.5,
+    "unknownObjective": "brand-lift",
+    "removedBriefField": "targetAudience",
+    "extraFieldName": "serverPath",
+    "extraFieldValue": "C:/private",
+    "callerRuntime": 999,
+    "invalidReviewStatus": "verified",
+    "emptyNarrativePurpose": "",
+    "duplicateFactId": "product",
+    "duplicateSceneId": "northstar-scene-opening"
+  }
+}
