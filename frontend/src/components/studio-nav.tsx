@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type MouseEvent } from "react";
 
 type WorkspaceSection = "overview" | "projects" | null;
 
@@ -27,10 +27,15 @@ export function StudioNav() {
     };
   }, [pathname]);
 
+  function selectSection(section: Exclude<WorkspaceSection, null>, event: MouseEvent<HTMLAnchorElement>) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    setActiveSection(section);
+  }
+
   return (
     <nav className="app-nav" aria-label="Main navigation">
-      <Link href="/#overview" aria-current={activeSection === "overview" ? "location" : undefined}>Overview</Link>
-      <Link href="/#projects" aria-current={activeSection === "projects" ? "location" : undefined}>Projects</Link>
+      <Link href="/#overview" onClick={(event) => selectSection("overview", event)} aria-current={pathname === "/" && activeSection === "overview" ? "location" : undefined}>Overview</Link>
+      <Link href="/#projects" onClick={(event) => selectSection("projects", event)} aria-current={pathname === "/" && activeSection === "projects" ? "location" : undefined}>Projects</Link>
     </nav>
   );
 }
