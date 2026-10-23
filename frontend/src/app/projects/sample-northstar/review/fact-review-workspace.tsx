@@ -2,7 +2,8 @@
 
 import { useState, type FormEvent } from "react";
 import Link from "next/link";
-import { correctDemoFact, decideDemoFact, deriveReviewStatusCounts, getApprovedDemoFacts, northstarDemoProject, type ProjectFact, type ReviewDecision, type ReviewStatus } from "./demo-facts";
+import { deriveReviewStatusCounts, getApprovedDemoFacts, type ProjectFact, type ReviewDecision, type ReviewStatus } from "./demo-facts";
+import { useNorthstarProjectState } from "../demo-project-provider";
 
 const statuses: ReviewStatus[] = ["unreviewed", "approved", "rejected"];
 const statusLabels: Record<ReviewStatus, string> = { unreviewed: "Unreviewed", approved: "Approved", rejected: "Rejected" };
@@ -13,7 +14,7 @@ const statusDetails: Record<ReviewStatus, { icon: string; className: string }> =
 };
 
 export default function FactReviewWorkspace() {
-  const [facts, setFacts] = useState(northstarDemoProject.facts);
+  const { facts, decideFact, correctFact } = useNorthstarProjectState();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
@@ -23,7 +24,7 @@ export default function FactReviewWorkspace() {
   const approvedCount = getApprovedDemoFacts(facts).length;
 
   function setStatus(fact: ProjectFact, decision: ReviewDecision) {
-    setFacts((current) => current.map((item) => item.id === fact.id ? decideDemoFact(item, decision) : item));
+    decideFact(fact.id, decision);
     setAnnouncement(`${fact.category} marked ${statusLabels[decision].toLowerCase()} in this demo. This change is temporary.`);
   }
 
@@ -48,7 +49,7 @@ export default function FactReviewWorkspace() {
       setError("Enter a claim before saving the correction.");
       return;
     }
-    setFacts((current) => current.map((item) => item.id === fact.id ? correctDemoFact(item, correctedClaim) : item));
+    correctFact(fact.id, correctedClaim);
     setEditingId(null);
     setDraft("");
     setError("");

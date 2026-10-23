@@ -17,6 +17,11 @@
 .readiness-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2rem; padding-block: 1.7rem; border-bottom: 1px solid var(--line); }
 .readiness-summary h2, .readiness-section-heading h2, .readiness-next-step h2 { margin: 0; font-family: var(--font-editorial); font-size: clamp(1.55rem, 3vw, 2rem); font-weight: 400; letter-spacing: -0.04em; }
 .readiness-summary-copy > p:last-child { max-width: 47rem; margin: 0.55rem 0 0; color: var(--muted); font-size: 0.82rem; }
+.readiness-counts { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; margin: 0.8rem 0 0; padding: 0; list-style: none; }
+.readiness-counts li { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--ink-soft); font-size: 0.74rem; }
+.readiness-counts .readiness-unreviewed > span { color: var(--warning); }
+.readiness-counts .readiness-approved > span { color: var(--success); }
+.readiness-counts .readiness-rejected > span { color: var(--danger); }
 .readiness-verdict { min-width: 15rem; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 0.15rem 0.65rem; margin: 0; padding: 0.75rem 0.9rem; border: 1px solid var(--danger); color: var(--danger); }
 .readiness-verdict > span { grid-row: span 2; font-size: 1.25rem; }
 .readiness-verdict strong { font-size: 0.78rem; }
@@ -35,6 +40,10 @@
 .readiness-approved { color: var(--success); }
 .readiness-rejected { color: var(--danger); }
 .readiness-use-note { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 0.75rem; }
+.readiness-eligible { margin-top: 1.2rem; padding: 1rem 1.1rem; border: 1px solid var(--line); background: var(--surface); }
+.readiness-eligible h3 { margin: 0; font-family: var(--font-editorial); font-size: 1.15rem; font-weight: 400; }
+.readiness-eligible ul { display: grid; gap: 0.35rem; margin: 0.6rem 0; padding-left: 1.2rem; color: var(--ink); font-size: 0.82rem; }
+.readiness-eligible > p { margin: 0.6rem 0 0; color: var(--muted); font-size: 0.73rem; }
 .readiness-blockers > ol > li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 1rem; padding: 1rem 0; border-bottom: 1px solid var(--line); }
 .readiness-blocker-number { color: var(--accent-strong); font-family: var(--font-editorial); font-size: 1.35rem; }
 .readiness-blockers h3 { margin: 0; font-size: 0.85rem; font-weight: 650; }
