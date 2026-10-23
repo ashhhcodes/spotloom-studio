@@ -149,7 +149,7 @@ export default function CreativeBriefWorkspace() {
         </aside>
       </div>
 
-      <footer className="brief-footer"><p>Illustrative demo only · No website scanned · No independent verification · No data saved</p><div><Link href="/projects/sample-northstar/review">Fact review</Link><Link href="/projects/sample-northstar/creative">Creative readiness</Link><Link href="/projects/sample-northstar">Sample project</Link></div></footer>
+      <footer className="brief-footer"><p>Illustrative demo only · No website scanned · No independent verification · No data saved</p><div><Link href="/projects/sample-northstar/storyboard">Plan storyboard scenes</Link><Link href="/projects/sample-northstar/review">Fact review</Link><Link href="/projects/sample-northstar/creative">Creative readiness</Link><Link href="/projects/sample-northstar">Sample project</Link></div></footer>
     </main>
   );
 }
