@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import re
 from typing import Literal
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
 
 from .integration_schemas import (
     BusinessClaim,
@@ -94,6 +95,7 @@ class PreproductionValidationResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
+    correlationId: StrictStr
     requestSchemaValid: StrictBool
     evaluationStatus: EvaluationStatus
     readinessStatus: ReadinessStatus
@@ -103,6 +105,16 @@ class PreproductionValidationResponse(BaseModel):
     summary: FindingSummary
     factSummary: FactSummary
     storyboardSummary: StoryboardSummary
+
+    @field_validator("correlationId")
+    @classmethod
+    def require_canonical_correlation_id(cls, value: str) -> str:
+        try:
+            if str(UUID(value)) != value:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("correlationId must be a canonical UUID string") from exc
+        return value
 
 
 def _nonempty(value: str) -> bool:
@@ -142,6 +154,7 @@ def _finding(
 
 
 def evaluate_preproduction(
+    correlation_id: str,
     facts: BusinessClaims,
     brief: CreativeBrief,
     storyboard: StoryboardInput,
@@ -314,6 +327,7 @@ def evaluate_preproduction(
     info_count = sum(finding.severity == "info" for finding in unique_findings)
 
     return PreproductionValidationResponse(
+        correlationId=correlation_id,
         requestSchemaValid=True,
         evaluationStatus="evaluated-with-limitations",
         readinessStatus="needs-attention" if blocker_count else "ready-for-human-review",

@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 from typing import Literal, Sequence
+from uuid import UUID
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -174,9 +175,20 @@ class StoryboardInput(_ContractModel):
 class PreproductionValidationRequest(_ContractModel):
     """Strict request envelope; nested contracts are validated by the pure helper."""
 
+    correlationId: StrictStr
     facts: dict[str, object]
     brief: dict[str, object]
     storyboard: dict[str, object]
+
+    @field_validator("correlationId")
+    @classmethod
+    def require_canonical_correlation_id(cls, value: str) -> str:
+        try:
+            if str(UUID(value)) != value:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("correlationId must be a canonical UUID string") from exc
+        return value
 
 
 @dataclass(frozen=True)

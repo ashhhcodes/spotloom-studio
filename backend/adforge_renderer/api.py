@@ -83,9 +83,10 @@ def validate_preproduction(
                 },
             )
         return evaluate_preproduction(
-            BusinessClaims.model_validate(payload.facts),
-            CreativeBrief.model_validate(payload.brief),
-            StoryboardInput.model_validate(payload.storyboard),
+            correlation_id=payload.correlationId,
+            facts=BusinessClaims.model_validate(payload.facts),
+            brief=CreativeBrief.model_validate(payload.brief),
+            storyboard=StoryboardInput.model_validate(payload.storyboard),
         )
     except Exception as error:
         # Log only a fixed event and exception class; exception text may contain input.

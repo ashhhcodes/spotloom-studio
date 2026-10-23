@@ -14,10 +14,12 @@ import { cloneInitialStoryboard } from "../src/app/projects/sample-northstar/sto
 const facts = northstarDemoProject.facts;
 const brief = { ...initialNorthstarBrief, reliedUponFactIds: [...initialNorthstarBrief.reliedUponFactIds] };
 const scenes = cloneInitialStoryboard();
-const request = toPreproductionRequest(facts, brief, scenes);
+const snapshot = toPreproductionRequest(facts, brief, scenes);
+const request = { ...snapshot, correlationId: "a714886a-bd4c-4dde-9f88-8e29c5d764b1" };
 
 function validResponse(): PreproductionResponse {
   return {
+    correlationId: request.correlationId,
     requestSchemaValid: true,
     evaluationStatus: "evaluated-with-limitations",
     readinessStatus: "needs-attention",
@@ -54,6 +56,13 @@ function validResponse(): PreproductionResponse {
   };
 }
 
+function responseForRequest(payload: PreproductionResponse, status = 200): typeof fetch {
+  return async (_input, init) => {
+    const submitted = JSON.parse(String(init?.body)) as { correlationId: string };
+    return new Response(JSON.stringify({ ...payload, correlationId: submitted.correlationId }), { status });
+  };
+}
+
 test("request mapping sends only current facts, brief, and ordered scenes", () => {
   const request = toPreproductionRequest(facts, brief, scenes);
   assert.deepEqual(Object.keys(request), ["facts", "brief", "storyboard"]);
@@ -74,13 +83,18 @@ test("the HTTP request serializes exactly the mapped contract to the scoped same
   await requestPreproductionEvaluation(request, async (input, init) => {
     requestedUrl = input;
     requestedInit = init;
-    return new Response(JSON.stringify(validResponse()), { status: 200 });
+    const sent = JSON.parse(String(init?.body)) as { correlationId: string };
+    return new Response(JSON.stringify({ ...validResponse(), correlationId: sent.correlationId }), { status: 200 });
   });
 
   assert.equal(requestedUrl, "/api/adforge/validate/preproduction");
   assert.equal(requestedInit?.method, "POST");
   assert.equal(new Headers(requestedInit?.headers).get("content-type"), "application/json");
-  assert.deepEqual(JSON.parse(String(requestedInit?.body)), request);
+  const sent = JSON.parse(String(requestedInit?.body));
+  assert.match(sent.correlationId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  const sentSnapshot = { ...sent };
+  delete sentSnapshot.correlationId;
+  assert.deepEqual(sentSnapshot, request);
   assert.equal(requestedInit?.cache, "no-store");
 });
 
@@ -89,15 +103,41 @@ test("successful response is accepted only when contract fields and derived coun
   assert.equal(isPreproductionResponse(payload, request), true);
   const result = await requestPreproductionEvaluation(
     request,
-    async () => new Response(JSON.stringify(payload), { status: 200 }),
+    responseForRequest(payload),
   );
   assert.equal(result.factualVerification, "not-performed");
   assert.equal(result.summary.blockerCount, 1);
 });
 
+test("responses require a valid correlation ID matching the current evaluation", async () => {
+  const otherId = "d7ad5c24-4bb0-44da-87cb-3c73fffe87a8";
+  const otherRequest = { ...request, correlationId: otherId };
+  const missing = { ...validResponse() } as Partial<PreproductionResponse>;
+  delete missing.correlationId;
+  const malformed = { ...validResponse(), correlationId: "not-a-uuid" };
+  const responseFromOtherEvaluation = { ...validResponse(), correlationId: otherId };
+
+  assert.equal(isPreproductionResponse(missing, request), false);
+  assert.equal(isPreproductionResponse(malformed, request), false);
+  assert.equal(isPreproductionResponse(responseFromOtherEvaluation, request), false);
+  assert.equal(isPreproductionResponse(responseFromOtherEvaluation, otherRequest), true);
+
+  for (const payload of [missing, malformed, responseFromOtherEvaluation]) {
+    await assert.rejects(
+      requestPreproductionEvaluation(request, async () => new Response(JSON.stringify(payload))),
+      (error: unknown) => error instanceof PreproductionApiError
+        && error.kind === "invalid-response"
+        && !error.message.includes("not-a-uuid")
+        && !error.message.includes(otherId),
+    );
+  }
+});
+
 test("empty storyboard response matches the request with unavailable runtime", async () => {
-  const emptyRequest = toPreproductionRequest(facts, brief, []);
+  const emptySnapshot = toPreproductionRequest(facts, brief, []);
+  const emptyRequest = { ...emptySnapshot, correlationId: request.correlationId };
   const payload = validResponse();
+  payload.correlationId = emptyRequest.correlationId;
   payload.storyboardSummary = {
     sceneCount: 0,
     plannedRuntimeSeconds: null,
@@ -106,7 +146,7 @@ test("empty storyboard response matches the request with unavailable runtime", a
     runtimeUnavailableReason: "empty",
   };
   assert.equal(isPreproductionResponse(payload, emptyRequest), true);
-  const result = await requestPreproductionEvaluation(emptyRequest, async () => new Response(JSON.stringify(payload)));
+  const result = await requestPreproductionEvaluation(emptySnapshot, responseForRequest(payload));
   assert.equal(result.storyboardSummary.plannedRuntimeSeconds, null);
   assert.equal(result.storyboardSummary.runtimeUnavailableReason, "empty");
 });
@@ -147,7 +187,7 @@ test("internally consistent results that disagree with the submitted snapshot ar
     mutate(payload);
     assert.equal(isPreproductionResponse(payload, request), false);
     await assert.rejects(
-      requestPreproductionEvaluation(request, async () => new Response(JSON.stringify(payload))),
+      requestPreproductionEvaluation(request, responseForRequest(payload)),
       (error: unknown) => error instanceof PreproductionApiError
         && error.kind === "invalid-response"
         && error.message.includes("submitted snapshot")
@@ -158,12 +198,14 @@ test("internally consistent results that disagree with the submitted snapshot ar
 });
 
 test("eligible fact IDs retain the submitted fact order", () => {
-  const approvedRequest = toPreproductionRequest(
+  const approvedSnapshot = toPreproductionRequest(
     facts.map((fact) => ({ ...fact, status: "approved" as const })),
     brief,
     scenes,
   );
+  const approvedRequest = { ...approvedSnapshot, correlationId: request.correlationId };
   const payload = validResponse();
+  payload.correlationId = approvedRequest.correlationId;
   payload.factSummary = {
     total: facts.length,
     callerMarkedApproved: facts.length,
@@ -179,11 +221,12 @@ test("eligible fact IDs retain the submitted fact order", () => {
 
 test("a snapshot mismatch can be retried successfully", async () => {
   let attempts = 0;
-  const fetcher: typeof fetch = async () => {
+  const fetcher: typeof fetch = async (_input, init) => {
     attempts += 1;
     const payload = validResponse();
     if (attempts === 1) payload.storyboardSummary.sceneCount += 1;
-    return new Response(JSON.stringify(payload));
+    const sent = JSON.parse(String(init?.body)) as { correlationId: string };
+    return new Response(JSON.stringify({ ...payload, correlationId: sent.correlationId }));
   };
   await assert.rejects(requestPreproductionEvaluation(request, fetcher), (error: unknown) =>
     error instanceof PreproductionApiError && error.kind === "invalid-response");
@@ -216,17 +259,41 @@ test("an abort remains an abort instead of being converted to a network failure"
 
 test("a failed request can be retried successfully without rebuilding the client", async () => {
   let attempts = 0;
-  const fetcher: typeof fetch = async () => {
+  const correlationIds: string[] = [];
+  const fetcher: typeof fetch = async (_input, init) => {
     attempts += 1;
-    return attempts === 1
-      ? new Response("<internal failure>", { status: 503 })
-      : new Response(JSON.stringify(validResponse()), { status: 200 });
+    const sent = JSON.parse(String(init?.body)) as { correlationId: string };
+    correlationIds.push(sent.correlationId);
+    if (attempts === 1) return new Response("<internal failure>", { status: 503 });
+    return new Response(JSON.stringify({ ...validResponse(), correlationId: sent.correlationId }), { status: 200 });
   };
   await assert.rejects(requestPreproductionEvaluation(request, fetcher), (error: unknown) =>
     error instanceof PreproductionApiError && error.kind === "http" && !error.message.includes("internal failure"));
   const retried = await requestPreproductionEvaluation(request, fetcher);
   assert.equal(attempts, 2);
+  assert.notEqual(correlationIds[0], correlationIds[1]);
   assert.equal(retried.evaluationStatus, "evaluated-with-limitations");
+});
+
+test("each evaluation retry gets a fresh ID and rejects the previous attempt response", async () => {
+  let attempts = 0;
+  const correlationIds: string[] = [];
+  const oldId = "d7ad5c24-4bb0-44da-87cb-3c73fffe87a8";
+  const fetcher: typeof fetch = async (_input, init) => {
+    attempts += 1;
+    const sent = JSON.parse(String(init?.body)) as { correlationId: string };
+    correlationIds.push(sent.correlationId);
+    const payload = validResponse();
+    payload.correlationId = attempts === 1 ? oldId : sent.correlationId;
+    return new Response(JSON.stringify(payload));
+  };
+
+  await assert.rejects(requestPreproductionEvaluation(request, fetcher), (error: unknown) =>
+    error instanceof PreproductionApiError && error.kind === "invalid-response");
+  const result = await requestPreproductionEvaluation(request, fetcher);
+  assert.equal(attempts, 2);
+  assert.notEqual(correlationIds[0], correlationIds[1]);
+  assert.equal(result.correlationId, correlationIds[1]);
 });
 
 test("HTTP and schema errors never expose server details and keep only sanitized field paths", async () => {

@@ -6,7 +6,7 @@
 
 This document records the frontend's current domain, backend's verified local capabilities, and the limited implemented pre-production validation contract. Other business API boundaries remain proposals.
 
-The validation route accepts caller-submitted facts, a brief, and storyboard, then applies strict schema checks and derives runtime. Only the Creative Readiness page is connected; its request is user-triggered and evaluates a single snapshot without persistence or generation. The existing CLI commands are not HTTP interfaces and must not be treated as such.
+The validation route accepts a frontend-generated UUID correlation ID plus caller-submitted facts, a brief, and storyboard, then applies strict schema checks and derives runtime. A successful response echoes the validated correlation ID for response association only. It is not authentication, authorization, integrity attestation, factual verification, or proof that findings are correct. Error responses omit the correlation ID. Only the Creative Readiness page is connected; its request is user-triggered and evaluates a single snapshot without persistence or generation. The existing CLI commands are not HTTP interfaces and must not be treated as such.
 
 ## 2. Current architecture and verified capabilities
 
@@ -97,10 +97,11 @@ Automated frontend evidence is limited to TypeScript assignability and execution
 
 ### 5A. Implemented pre-production validation endpoint (Phase 6E.1)
 
-`POST /validate/preproduction` is the only business-data HTTP endpoint. It is read-only, deterministic, and evaluates each request independently. The server is still bound to `127.0.0.1` by default. The endpoint accepts only the following top-level keys; each nested object is checked by the existing `BusinessClaims`, `CreativeBrief`, and `StoryboardInput` schemas through `validate_contract_input`:
+`POST /validate/preproduction` is the only business-data HTTP endpoint. It is read-only, deterministic, and evaluates each request independently. The server is still bound to `127.0.0.1` by default. Every request requires a canonical lowercase UUID string in `correlationId`; the frontend creates a fresh value for every attempt, including retries. A valid request's successful response echoes that value. The identifier associates a response with one attempt only; it is not authentication, authorization, integrity attestation, factual verification, or proof that findings are correct. The endpoint accepts only the following top-level keys; each nested object is checked by the existing `BusinessClaims`, `CreativeBrief`, and `StoryboardInput` schemas through `validate_contract_input`:
 
 ```json
 {
+  "correlationId": "a714886a-bd4c-4dde-9f88-8e29c5d764b1",
   "facts": { "facts": [] },
   "brief": {
     "objective": "awareness",
@@ -139,6 +140,7 @@ A schema-valid response uses this shape. This representative response is grounde
 
 ```json
 {
+  "correlationId": "a714886a-bd4c-4dde-9f88-8e29c5d764b1",
   "requestSchemaValid": true,
   "evaluationStatus": "evaluated-with-limitations",
   "readinessStatus": "ready-for-human-review",
@@ -204,11 +206,11 @@ The example finding and summaries are from the shared Northstar fixture. Finding
 }
 ```
 
-Malformed JSON, missing top-level fields, wrong top-level types, and unknown top-level fields return HTTP 422 with `requestSchemaValid: false`, `evaluationStatus: "not-evaluated"`, no issue details, and a null runtime. Error responses do not echo submitted values or exception text. Unexpected validation failures are logged only with a fixed event and exception class, and return HTTP 500 with `evaluationStatus: "failed"` and `{"detail":"Pre-production validation could not be completed."}`. `GET /health` is unchanged.
+Malformed JSON, missing or malformed correlation IDs, missing top-level fields, wrong top-level types, and unknown top-level fields return HTTP 422 with `requestSchemaValid: false`, `evaluationStatus: "not-evaluated"`, no issue details, and a null runtime. Nested schema errors also return sanitized 422 issues. No error response echoes the correlation ID, even if it was valid, and errors never echo arbitrary submitted values or exception text. Unexpected validation failures are logged only with a fixed event and exception class, and return HTTP 500 with `evaluationStatus: "failed"` and `{"detail":"Pre-production validation could not be completed."}`. `GET /health` is unchanged.
 
 `PreproductionFinding` fields are `id`, `severity` (`blocker`, `warning`, `info`), `category` (`brief`, `facts`, `storyboard`, `runtime`, `grounding`, `production`), `title`, `explanation`, `resolution`, `destinationRoutes`, `blocksReadiness`, and nullable affected IDs. The summary's blocker count is derived from `blocksReadiness`; warning and info counts are derived from severity. Finding IDs are deduplicated and ordered by severity, category, affected entity ID, and ID. `readinessStatus` is `needs-attention` if any blocker exists, otherwise `ready-for-human-review`; that status never means production readiness. `evaluationStatus` is always `evaluated-with-limitations` for valid requests. The brief confirmation signal is reported separately as `caller-declared-confirmed` or `not-confirmed`. `factualVerification` is always `not-performed`.
 
-A 200 response means the request matches the structural contract and the supported deterministic rules were evaluated. It does not mean the brief is factually correct, caller-marked approvals are independently reviewed or verified, claims are semantically grounded, or an ad is ready. No client-supplied runtime, readiness, finding, or count is accepted. The endpoint does not cross-check `reliedUponFactIds` against facts or compare scene IDs against a client-supplied fact relationship because no such relationship exists in the models. It associates only exact normalized copy matches in on-screen text and narration, as the frontend does. No HTTP client, filesystem, subprocess, persistence, scanning, generation, rendering, export, or frontend integration is used.
+A 200 response means the request matches the structural contract and the supported deterministic rules were evaluated. It does not mean the brief is factually correct, caller-marked approvals are independently reviewed or verified, claims are semantically grounded, or an ad is ready. No client-supplied runtime, readiness, finding, or count is accepted. The endpoint does not cross-check `reliedUponFactIds` against facts or compare scene IDs against a client-supplied fact relationship because no such relationship exists in the models. It associates only exact normalized copy matches in on-screen text and narration, as the frontend does. The validation logic performs no outbound HTTP, filesystem, subprocess, persistence, scanning, generation, rendering, or export operation; the frontend integration is limited to the Creative Readiness action described above.
 
 #### Frontend rule mapping and parity limits (Phase 6E.2)
 

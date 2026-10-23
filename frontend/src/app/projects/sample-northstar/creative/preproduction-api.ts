@@ -2,11 +2,13 @@ import type { CreativeBrief } from "../creative-brief";
 import type { StoryboardScene } from "../storyboard-model";
 import type { ProjectFact } from "../review/demo-facts";
 
-export type PreproductionRequest = {
+export type PreproductionSnapshot = {
   facts: { facts: ProjectFact[] };
   brief: CreativeBrief;
   storyboard: { scenes: StoryboardScene[] };
 };
+
+export type PreproductionRequest = PreproductionSnapshot & { correlationId: string };
 
 export type BackendFinding = {
   id: string;
@@ -22,6 +24,7 @@ export type BackendFinding = {
 };
 
 export type PreproductionResponse = {
+  correlationId: string;
   requestSchemaValid: true;
   evaluationStatus: "evaluated-with-limitations";
   readinessStatus: "needs-attention" | "ready-for-human-review";
@@ -70,6 +73,7 @@ const workspaceRoutes = new Set([
 ]);
 const severities = new Set(["blocker", "warning", "info"]);
 const categories = new Set(["brief", "facts", "storyboard", "runtime", "grounding", "production"]);
+const canonicalUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -143,9 +147,11 @@ function matchesSubmittedSnapshot(response: PreproductionResponse, request: Prep
 /** Runtime-check the strict backend response and bind derived values to its request snapshot. */
 export function isPreproductionResponse(value: unknown, request: PreproductionRequest): value is PreproductionResponse {
   if (!isRecord(value) || !hasExactKeys(value, [
-    "requestSchemaValid", "evaluationStatus", "readinessStatus", "briefConfirmationSignal",
+    "correlationId", "requestSchemaValid", "evaluationStatus", "readinessStatus", "briefConfirmationSignal",
     "factualVerification", "findings", "summary", "factSummary", "storyboardSummary",
-  ]) || value.requestSchemaValid !== true
+  ]) || typeof value.correlationId !== "string" || !canonicalUuid.test(value.correlationId)
+    || value.correlationId !== request.correlationId
+    || value.requestSchemaValid !== true
     || value.evaluationStatus !== "evaluated-with-limitations"
     || (value.readinessStatus !== "needs-attention" && value.readinessStatus !== "ready-for-human-review")
     || (value.briefConfirmationSignal !== "caller-declared-confirmed" && value.briefConfirmationSignal !== "not-confirmed")
@@ -198,7 +204,7 @@ export function toPreproductionRequest(
   facts: readonly ProjectFact[],
   brief: CreativeBrief,
   scenes: readonly StoryboardScene[],
-): PreproductionRequest {
+): PreproductionSnapshot {
   return {
     facts: { facts: facts.map((fact) => ({ ...fact, revisions: [...fact.revisions], source: { ...fact.source } })) },
     brief: { ...brief, reliedUponFactIds: [...brief.reliedUponFactIds] },
@@ -217,16 +223,17 @@ function safeIssues(value: unknown): SafeValidationIssue[] {
 }
 
 export async function requestPreproductionEvaluation(
-  request: PreproductionRequest,
+  request: PreproductionSnapshot,
   fetcher: typeof fetch = fetch,
   signal?: AbortSignal,
 ): Promise<PreproductionResponse> {
+  const attemptRequest: PreproductionRequest = { ...request, correlationId: globalThis.crypto.randomUUID() };
   let response: Response;
   try {
     response = await fetcher(evaluationEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(request),
+      body: JSON.stringify(attemptRequest),
       cache: "no-store",
       signal,
     });
@@ -257,7 +264,7 @@ export async function requestPreproductionEvaluation(
     throw new PreproductionApiError("http", `The backend returned HTTP ${response.status}. Retry the evaluation.`, response.status);
   }
 
-  if (!isPreproductionResponse(body, request)) {
+  if (!isPreproductionResponse(body, attemptRequest)) {
     throw new PreproductionApiError("invalid-response", "The backend response did not match the submitted snapshot or supported evaluation contract.", response.status);
   }
   return body;

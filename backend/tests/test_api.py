@@ -19,6 +19,7 @@ VALID = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))["validNorthstar"]
 
 def valid_request() -> dict[str, object]:
     return copy.deepcopy({
+        "correlationId": "a714886a-bd4c-4dde-9f88-8e29c5d764b1",
         "facts": {"facts": VALID["facts"]},
         "brief": VALID["brief"],
         "storyboard": VALID["storyboard"],
@@ -137,6 +138,7 @@ def test_preproduction_validation_returns_schema_result_and_derived_runtime() ->
     assert response.status_code == 200
     body = response.json()
     assert body["requestSchemaValid"] is True
+    assert body["correlationId"] == "a714886a-bd4c-4dde-9f88-8e29c5d764b1"
     assert body["evaluationStatus"] == "evaluated-with-limitations"
     assert body["readinessStatus"] == "needs-attention"
     assert body["briefConfirmationSignal"] == "not-confirmed"
@@ -383,6 +385,7 @@ def test_schema_issues_are_sanitized_and_change_with_input(payload_mutation, exp
     assert any(issue["path"] == expected_path for issue in body["issues"])
     assert all(set(issue) == {"path", "code", "message"} for issue in body["issues"])
     assert all(issue["message"] == "Value does not match the supported contract." for issue in body["issues"])
+    assert "correlationId" not in body
 
 
 @pytest.mark.parametrize("duration", [None, 1.5, 0, -1, 61])
@@ -426,6 +429,31 @@ def test_malformed_json_and_missing_required_fields_return_sanitized_422() -> No
     assert malformed.json() == missing.json() == expected_error
     assert "traceback" not in malformed.text.lower()
     assert str(Path.cwd()) not in missing.text
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda payload: payload.pop("correlationId"),
+        lambda payload: payload.update(correlationId="unvalidated-correlation-secret"),
+        lambda payload: payload.update(requestId="unexpected-correlation-secret"),
+    ],
+    ids=["missing", "malformed", "extra-alias"],
+)
+def test_invalid_correlation_fields_return_sanitized_422_without_echo(mutation) -> None:
+    payload = valid_request()
+    mutation(payload)
+
+    with TestClient(api.app) as client:
+        response = client.post("/validate/preproduction", json=payload)
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["requestSchemaValid"] is False
+    assert body["evaluationStatus"] == "not-evaluated"
+    assert "correlationId" not in body
+    assert "unvalidated-correlation-secret" not in response.text
+    assert "unexpected-correlation-secret" not in response.text
 
 
 def test_request_cannot_supply_runtime_or_readiness_as_authoritative() -> None:

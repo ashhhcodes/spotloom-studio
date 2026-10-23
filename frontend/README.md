@@ -26,7 +26,7 @@ npm run build
 
 ## Local pre-production evaluation
 
-Creative Readiness keeps its live local validator as a separate reference and can explicitly submit the current facts, brief, and ordered storyboard scenes to `POST /validate/preproduction`. No request is sent automatically. The backend returns structural findings and runtime; it does not verify facts, authorize work, persist project state, or generate an advertisement. Caller-marked fact approval and brief confirmation are submitted values, not authenticated decisions.
+Creative Readiness keeps its live local validator as a separate reference and can explicitly submit the current facts, brief, and ordered storyboard scenes to `POST /validate/preproduction`. No request is sent automatically. Each evaluation attempt, including retries, gets a fresh UUID `correlationId`; the frontend accepts a successful response only when it echoes the UUID sent in that attempt. Errors omit the correlation ID. Correlation associates a response with an attempt only; it is not authentication, authorization, integrity attestation, factual verification, or proof that findings are correct. The backend returns structural findings and runtime; it does not verify facts, authorize work, persist project state, or generate an advertisement. Caller-marked fact approval and brief confirmation are submitted values, not authenticated decisions.
 
 Start the backend in one PowerShell window:
 
@@ -55,7 +55,7 @@ Restart the frontend after changing this value. It is public configuration, not 
 
 The frontend package has no React component or browser automation test runner. For a manual reliability check, start both services and open `/projects/sample-northstar/creative`:
 
-1. With browser DevTools Network open and request throttling enabled, activate **Evaluate with backend** by mouse, then repeat using Tab plus Enter or Space. Confirm one POST is sent, the button is disabled while pending, and the loading status is announced.
+1. With browser DevTools Network open and request throttling enabled, activate **Evaluate with backend** by mouse, then repeat using Tab plus Enter or Space. Confirm one POST is sent, its body has a UUID `correlationId`, the successful response echoes that exact value, the button is disabled while pending, and the loading status is announced. Retry and confirm a fresh UUID is sent.
 2. During a pending request, navigate to Fact Review, approve or correct a fact, then return to Creative Readiness. Confirm no old response appears and the page is not stuck loading. Repeat by changing a brief field and reordering a storyboard scene.
 3. Complete an evaluation, then leave the route and change a submitted field. Return and confirm the prior page-local result is cleared; submit again and confirm the new response is distinct from the local reference section.
 4. Stop the backend, request evaluation, and confirm a safe retry message appears without stack details. Restart the backend and retry without refreshing. For a schema error, submit an over-limit brief field and confirm only sanitized field paths/messages are shown.
