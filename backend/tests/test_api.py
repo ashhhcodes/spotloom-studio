@@ -100,3 +100,5 @@ def test_no_business_routes_are_exposed() -> None:
         assert client.get("/").status_code == 404
         assert client.get("/docs").status_code == 404
         assert client.get("/openapi.json").status_code == 404
+        assert client.get("/scan").status_code == 404
+        assert client.post("/scan", json={"url": "https://example.com"}).status_code == 404

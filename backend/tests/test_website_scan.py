@@ -58,6 +58,23 @@ def test_rejects_hostname_with_any_private_answer_and_dns_failure():
     assert "private resolver detail" not in str(err.value)
 
 
+@pytest.mark.parametrize("address", [
+    "0.0.0.0", "127.0.0.1", "10.0.0.1", "169.254.1.1", "100.64.0.1",
+    "192.0.2.1", "224.0.0.1", "240.0.0.1", "255.255.255.255", "::",
+    "::1", "::ffff:10.0.0.1", "fe80::1", "fc00::1", "ff02::1", "2001:db8::1",
+])
+def test_rejects_nonpublic_ip_literal_destinations(address):
+    host = f"[{address}]" if ":" in address else address
+    with pytest.raises(FetchPolicyError):
+        normalize_and_validate_url(f"https://{host}/", public_resolver)
+
+
+def test_normalizes_public_idn_hostname_and_drops_fragment():
+    normalized = normalize_and_validate_url("HTTPS://BÜCHER.example:443/about#contact", public_resolver)
+
+    assert normalized == "https://xn--bcher-kva.example:443/about"
+
+
 def test_robots_allowed_fetches_page_and_uses_declared_agent():
     seen = []
     transport = httpx.MockTransport(response_handler({

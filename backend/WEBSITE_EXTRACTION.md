@@ -12,7 +12,11 @@ The local scan CLI fetches at most one public page and returns deterministic, un
 
 ### SSRF limitation
 
-The hostname is checked immediately before HTTPX connects, but the normal HTTP stack resolves the hostname again for the connection. This leaves a DNS rebinding/time-of-check-to-time-of-use gap: application checks alone cannot guarantee the connection uses the validated IP. Do not expose this local CLI as a public service. A deployment needs network egress isolation or a hardened transport that pins the validated destination, plus defense-in-depth restrictions. No claim of complete SSRF protection is made.
+The hostname is checked immediately before HTTPX connects, but the normal HTTP stack resolves the hostname again for the connection. This leaves a DNS rebinding/time-of-check-to-time-of-use gap: application checks alone cannot guarantee the connection uses the validated IP. The current API intentionally has no scan endpoint. Do not expose this local CLI as a public service. A deployment needs network egress isolation or a hardened transport that pins the validated destination, plus defense-in-depth restrictions. No claim of complete SSRF protection is made.
+
+The address predicate explicitly rejects non-global, private, reserved, loopback, link-local, multicast, and unspecified addresses, including IPv4-mapped IPv6. Redirects are disabled in HTTPX and followed manually only after each destination is revalidated. These checks are useful defense in depth, but do not close the DNS rebinding gap. The 20-second timeout surrounds network fetching; synchronous BeautifulSoup parsing occurs after the fetch timeout and has no separate CPU/time limit. The scanner also has no service-level concurrency cap. A future network service needs enforceable egress controls and resource/concurrency limits rather than relying on URL checks alone.
+
+`ScanResult.original_url` retains the submitted input, including userinfo in a URL rejected for embedded credentials. A future HTTP adapter must redact or omit rejected raw URLs from responses and logs; the current local CLI is not a safe HTTP response contract.
 
 ## Extraction and fact review
 

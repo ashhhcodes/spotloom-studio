@@ -70,7 +70,15 @@ def _public_ip(value: str) -> bool:
         return False
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         ip = ip.ipv4_mapped
-    return ip.is_global and not ip.is_reserved
+    return (
+        ip.is_global
+        and not ip.is_private
+        and not ip.is_reserved
+        and not ip.is_loopback
+        and not ip.is_link_local
+        and not ip.is_multicast
+        and not ip.is_unspecified
+    )
 
 
 def normalize_and_validate_url(url: str, resolver=socket.getaddrinfo) -> str:
