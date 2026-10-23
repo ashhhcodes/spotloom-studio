@@ -46,3 +46,35 @@ export const initialNorthstarStoryboard: StoryboardScene[] = [
 export function cloneInitialStoryboard(): StoryboardScene[] {
   return initialNorthstarStoryboard.map((scene) => ({ ...scene }));
 }
+
+export function updateStoryboardScene(
+  scenes: readonly StoryboardScene[],
+  sceneId: string,
+  patch: Partial<StoryboardScene>,
+): StoryboardScene[] {
+  return scenes.map((scene) => scene.id === sceneId ? { ...scene, ...patch, id: scene.id } : scene);
+}
+
+export function appendStoryboardScene(
+  scenes: readonly StoryboardScene[],
+  scene: StoryboardScene,
+): StoryboardScene[] {
+  return [...scenes, { ...scene }];
+}
+
+export function deleteStoryboardScene(scenes: readonly StoryboardScene[], sceneId: string): StoryboardScene[] {
+  return scenes.filter((scene) => scene.id !== sceneId);
+}
+
+export function moveStoryboardScene(
+  scenes: readonly StoryboardScene[],
+  sceneId: string,
+  direction: -1 | 1,
+): StoryboardScene[] {
+  const index = scenes.findIndex((scene) => scene.id === sceneId);
+  const destination = index + direction;
+  if (index < 0 || destination < 0 || destination >= scenes.length) return [...scenes];
+  const reordered = [...scenes];
+  [reordered[index], reordered[destination]] = [reordered[destination], reordered[index]];
+  return reordered;
+}

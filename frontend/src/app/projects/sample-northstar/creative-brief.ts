@@ -15,6 +15,8 @@ export type CreativeBrief = {
   tone: string;
   callToAction: string;
   reliedUponFactIds: string[];
+  /** An explicit human confirmation for this in-memory demo brief; not factual verification. */
+  requirementsConfirmed: boolean;
 };
 
 /** Illustrative planning defaults only; these are not user-provided campaign requirements. */
@@ -30,4 +32,5 @@ export const initialNorthstarBrief: CreativeBrief = {
   tone: "Warm, considered, and clear",
   callToAction: "Learn more",
   reliedUponFactIds: ["audience", "product", "message"],
+  requirementsConfirmed: false,
 };

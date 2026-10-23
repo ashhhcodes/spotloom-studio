@@ -88,6 +88,11 @@ export default function CreativeBriefWorkspace() {
           <div className="brief-form-heading"><div><p className="brief-kicker">Campaign plan</p><h2>Brief details</h2></div><span>DEMO DEFAULTS</span></div>
           <p className="brief-form-intro">Every starting value is a sample prompt. Edit freely; nothing is submitted or saved.</p>
 
+          <label className="brief-confirmation">
+            <input type="checkbox" checked={brief.requirementsConfirmed} onChange={(event) => updateBrief({ requirementsConfirmed: event.currentTarget.checked })} />
+            <span><strong>Confirm this demo brief for human review</strong><small>This confirms the current planning choices only. It does not verify any business claim or approve an advertisement.</small></span>
+          </label>
+
           <div className="brief-field-grid">
             <label className="brief-field">Campaign objective
               <select value={brief.objective} onChange={(event) => updateBrief({ objective: event.currentTarget.value as CampaignObjective })}>

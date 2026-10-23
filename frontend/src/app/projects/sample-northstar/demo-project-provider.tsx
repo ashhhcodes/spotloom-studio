@@ -9,7 +9,14 @@ import {
   type ReviewDecision,
 } from "./review/demo-facts";
 import { initialNorthstarBrief, type CreativeBrief } from "./creative-brief";
-import { cloneInitialStoryboard, type StoryboardScene } from "./storyboard-model";
+import {
+  appendStoryboardScene,
+  cloneInitialStoryboard,
+  deleteStoryboardScene,
+  moveStoryboardScene,
+  updateStoryboardScene,
+  type StoryboardScene,
+} from "./storyboard-model";
 
 type NorthstarProjectState = {
   facts: ProjectFact[];
@@ -51,13 +58,14 @@ export function NorthstarDemoProjectProvider({ children }: { children: ReactNode
     correctFact: (factId, correctedClaim) => setFacts((current) => current.map((fact) =>
       fact.id === factId ? correctDemoFact(fact, correctedClaim) : fact,
     )),
-    updateBrief: (patch) => setBrief((current) => ({ ...current, ...patch,
+    updateBrief: (patch) => setBrief((current) => ({
+      ...current,
+      ...patch,
+      requirementsConfirmed: Object.hasOwn(patch, "requirementsConfirmed") ? Boolean(patch.requirementsConfirmed) : false,
       reliedUponFactIds: patch.reliedUponFactIds ? [...patch.reliedUponFactIds] : current.reliedUponFactIds,
     })),
     resetBrief: () => setBrief(cloneInitialBrief()),
-    updateScene: (sceneId, patch) => setScenes((current) => current.map((scene) =>
-      scene.id === sceneId ? { ...scene, ...patch, id: scene.id } : scene,
-    )),
+    updateScene: (sceneId, patch) => setScenes((current) => updateStoryboardScene(current, sceneId, patch)),
     addScene: () => {
       const scene: StoryboardScene = {
         id: crypto.randomUUID(),
@@ -69,17 +77,10 @@ export function NorthstarDemoProjectProvider({ children }: { children: ReactNode
         durationSeconds: 5,
         transitionNote: "",
       };
-      setScenes((current) => [...current, scene]);
+      setScenes((current) => appendStoryboardScene(current, scene));
     },
-    deleteScene: (sceneId) => setScenes((current) => current.filter((scene) => scene.id !== sceneId)),
-    moveScene: (sceneId, direction) => setScenes((current) => {
-      const index = current.findIndex((scene) => scene.id === sceneId);
-      const destination = index + direction;
-      if (index < 0 || destination < 0 || destination >= current.length) return current;
-      const reordered = [...current];
-      [reordered[index], reordered[destination]] = [reordered[destination], reordered[index]];
-      return reordered;
-    }),
+    deleteScene: (sceneId) => setScenes((current) => deleteStoryboardScene(current, sceneId)),
+    moveScene: (sceneId, direction) => setScenes((current) => moveStoryboardScene(current, sceneId, direction)),
     resetStoryboard: () => setScenes(cloneInitialStoryboard()),
   }), [facts, brief, scenes]);
 
