@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import Link from "next/link";
-import { correctDemoFact, deriveReviewStatusCounts, getApprovedDemoFacts, northstarDemoProject, type ProjectFact, type ReviewStatus } from "./demo-facts";
+import { correctDemoFact, decideDemoFact, deriveReviewStatusCounts, getApprovedDemoFacts, northstarDemoProject, type ProjectFact, type ReviewDecision, type ReviewStatus } from "./demo-facts";
 
 const statuses: ReviewStatus[] = ["unreviewed", "approved", "rejected"];
 const statusLabels: Record<ReviewStatus, string> = { unreviewed: "Unreviewed", approved: "Approved", rejected: "Rejected" };
@@ -22,9 +22,9 @@ export default function FactReviewWorkspace() {
   const counts = deriveReviewStatusCounts(facts);
   const approvedCount = getApprovedDemoFacts(facts).length;
 
-  function setStatus(fact: ProjectFact, status: ReviewStatus) {
-    setFacts((current) => current.map((item) => item.id === fact.id ? { ...item, status } : item));
-    setAnnouncement(`${fact.category} marked ${statusLabels[status].toLowerCase()} in this demo. This change is temporary.`);
+  function setStatus(fact: ProjectFact, decision: ReviewDecision) {
+    setFacts((current) => current.map((item) => item.id === fact.id ? decideDemoFact(item, decision) : item));
+    setAnnouncement(`${fact.category} marked ${statusLabels[decision].toLowerCase()} in this demo. This change is temporary.`);
   }
 
   function beginEdit(fact: ProjectFact) {

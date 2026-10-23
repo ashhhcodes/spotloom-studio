@@ -1,4 +1,5 @@
 export type ReviewStatus = "unreviewed" | "approved" | "rejected";
+export type ReviewDecision = Exclude<ReviewStatus, "unreviewed">;
 
 export type DemoFactSource = {
   kind: "illustrative-placeholder";
@@ -54,6 +55,15 @@ export function deriveReviewStatusCounts(facts: readonly ProjectFact[]): ReviewS
 /** Approved for this illustrative demo only; this does not establish real-world verification. */
 export function getApprovedDemoFacts(facts: readonly ProjectFact[]): ProjectFact[] {
   return facts.filter((fact) => fact.status === "approved");
+}
+
+/** Apply a demo review decision only to an unreviewed fact. */
+export function decideDemoFact(fact: ProjectFact, decision: ReviewDecision): ProjectFact {
+  if (fact.status !== "unreviewed") {
+    throw new Error("Only unreviewed facts can receive a review decision.");
+  }
+
+  return { ...fact, status: decision };
 }
 
 /** Apply an in-memory correction, retaining prior wording and requiring a fresh review. */
