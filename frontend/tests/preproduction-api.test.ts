@@ -65,6 +65,23 @@ test("request mapping sends only current facts, brief, and ordered scenes", () =
   assert.equal("runtime" in request, false);
 });
 
+test("the HTTP request serializes exactly the mapped contract to the scoped same-origin path", async () => {
+  let requestedUrl: RequestInfo | URL | undefined;
+  let requestedInit: RequestInit | undefined;
+  const request = toPreproductionRequest(facts, brief, scenes);
+  await requestPreproductionEvaluation(request, async (input, init) => {
+    requestedUrl = input;
+    requestedInit = init;
+    return new Response(JSON.stringify(validResponse()), { status: 200 });
+  });
+
+  assert.equal(requestedUrl, "/api/adforge/validate/preproduction");
+  assert.equal(requestedInit?.method, "POST");
+  assert.equal(new Headers(requestedInit?.headers).get("content-type"), "application/json");
+  assert.deepEqual(JSON.parse(String(requestedInit?.body)), request);
+  assert.equal(requestedInit?.cache, "no-store");
+});
+
 test("successful response is accepted only when contract fields and derived counts agree", async () => {
   const payload = validResponse();
   assert.equal(isPreproductionResponse(payload), true);
@@ -85,6 +102,33 @@ test("backend unavailable produces a retryable safe error", async () => {
       && error.kind === "unavailable"
       && !error.message.includes("private connection detail"),
   );
+});
+
+test("an abort remains an abort instead of being converted to a network failure", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    requestPreproductionEvaluation(toPreproductionRequest(facts, brief, scenes), async () => {
+      throw new DOMException("cancelled", "AbortError");
+    }, controller.signal),
+    (error: unknown) => error instanceof Error && error.name === "AbortError",
+  );
+});
+
+test("a failed request can be retried successfully without rebuilding the client", async () => {
+  let attempts = 0;
+  const fetcher: typeof fetch = async () => {
+    attempts += 1;
+    return attempts === 1
+      ? new Response("<internal failure>", { status: 503 })
+      : new Response(JSON.stringify(validResponse()), { status: 200 });
+  };
+  const request = toPreproductionRequest(facts, brief, scenes);
+  await assert.rejects(requestPreproductionEvaluation(request, fetcher), (error: unknown) =>
+    error instanceof PreproductionApiError && error.kind === "http" && !error.message.includes("internal failure"));
+  const retried = await requestPreproductionEvaluation(request, fetcher);
+  assert.equal(attempts, 2);
+  assert.equal(retried.evaluationStatus, "evaluated-with-limitations");
 });
 
 test("HTTP and schema errors never expose server details and keep only sanitized field paths", async () => {
@@ -123,4 +167,25 @@ test("malformed backend counts are rejected", () => {
   const payload = validResponse();
   payload.summary.blockerCount = 0;
   assert.equal(isPreproductionResponse(payload), false);
+});
+
+test("invalid and inconsistent response shapes or status combinations fail safely", () => {
+  const baseline = validResponse();
+  const mutations: unknown[] = [
+    null,
+    [],
+    {},
+    { ...baseline, unexpected: true },
+    { ...baseline, readinessStatus: "ready-for-human-review" },
+    { ...baseline, factSummary: { ...baseline.factSummary, total: 4 } },
+    { ...baseline, factSummary: { ...baseline.factSummary, invalidStatus: 1 } },
+    { ...baseline, storyboardSummary: {
+      ...baseline.storyboardSummary,
+      runtimeDifferenceSeconds: (baseline.storyboardSummary.runtimeDifferenceSeconds ?? 0) + 1,
+    } },
+    { ...baseline, findings: [{ ...baseline.findings[0], destinationRoutes: ["https://example.com"] }] },
+    { ...baseline, findings: [{ ...baseline.findings[0], unexpected: "field" }] },
+  ];
+
+  for (const mutation of mutations) assert.doesNotThrow(() => assert.equal(isPreproductionResponse(mutation), false));
 });

@@ -140,14 +140,14 @@ export default function CreativeReadinessWorkspace() {
         <div><h2 id="readiness-demo-title">Demo only · temporary shared state</h2><p>Content is illustrative. Changes to facts, brief, and scenes are shared across Northstar pages in this tab and reset on refresh. Nothing is sent until you request a backend evaluation; that request sends only the current facts, brief, and scenes to the configured local backend and is not persisted.</p></div>
       </aside>
 
-      <section className="backend-evaluation" aria-labelledby="backend-evaluation-title">
+      <section className="backend-evaluation" aria-labelledby="backend-evaluation-title" aria-busy={isLoading}>
         <div className="backend-evaluation-intro">
           <div><p className="readiness-kicker">Explicit backend action</p><h2 id="backend-evaluation-title">Request a backend evaluation</h2><p>Submits one snapshot of the current facts, brief, and ordered storyboard scenes. It does not authorize work, verify claims, or store project data.</p></div>
           <button type="button" className="backend-evaluation-button" onClick={evaluateWithBackend} disabled={isLoading}>
             {isLoading ? "Evaluating…" : "Evaluate with backend"}
           </button>
         </div>
-        <p className="backend-evaluation-status" role={backendState.status === "error" ? "alert" : "status"} aria-live="polite">
+        <p className="backend-evaluation-status" role={backendState.status === "error" ? "alert" : "status"} aria-live={backendState.status === "error" ? "assertive" : "polite"}>
           {backendState.status === "idle" && "No backend evaluation requested. The local reference check below updates automatically in this browser."}
           {backendState.status === "loading" && "Sending the current snapshot to the backend. Duplicate requests are paused while it runs."}
           {backendState.status === "stale" && "Inputs changed during the previous request. Its result was discarded; request an evaluation for the current state."}

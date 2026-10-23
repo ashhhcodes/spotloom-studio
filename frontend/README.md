@@ -50,3 +50,15 @@ NEXT_PUBLIC_ADFORGE_API_BASE_URL=http://127.0.0.1:8000
 ```
 
 Restart the frontend after changing this value. It is public configuration, not a place for credentials. The local and backend validators are not identical: backend schema violations return sanitized HTTP 422 issues; the local validator can represent some malformed states as findings. The backend also cannot infer whether brief values came from demo defaults. See the integration contract for the complete parity matrix and limitations.
+
+### Manual browser QA for Creative Readiness
+
+The frontend package has no React component or browser automation test runner. For a manual reliability check, start both services and open `/projects/sample-northstar/creative`:
+
+1. With browser DevTools Network open and request throttling enabled, activate **Evaluate with backend** by mouse, then repeat using Tab plus Enter or Space. Confirm one POST is sent, the button is disabled while pending, and the loading status is announced.
+2. During a pending request, navigate to Fact Review, approve or correct a fact, then return to Creative Readiness. Confirm no old response appears and the page is not stuck loading. Repeat by changing a brief field and reordering a storyboard scene.
+3. Complete an evaluation, then leave the route and change a submitted field. Return and confirm the prior page-local result is cleared; submit again and confirm the new response is distinct from the local reference section.
+4. Stop the backend, request evaluation, and confirm a safe retry message appears without stack details. Restart the backend and retry without refreshing. For a schema error, submit an over-limit brief field and confirm only sanitized field paths/messages are shown.
+5. Use keyboard-only navigation and a screen reader to verify the visible focus ring, disabled/loading announcement, successful status, assertive error announcement, findings headings, and that Generate Ad remains disabled.
+
+Results are held only by the Creative Readiness page and are discarded on route navigation or refresh. Northstar facts, brief, and storyboard continue to use the existing shared in-memory provider and reset on refresh.
