@@ -1,18 +1,18 @@
 # Spotloom Studio frontend/backend integration contract
 
-**Status: planning document.** The only implemented HTTP route is `GET /health`, a local application liveness check. The future business API boundaries and examples below are proposals only.
+**Status: partially implemented contract.** The local FastAPI app exposes `GET /health` and `POST /validate/preproduction`. The validation route is described in §5A. Website scanning, review, persistence, generation, rendering, and other business API boundaries remain proposals or unavailable as stated below.
 
 ## 1. Purpose and non-goals
 
-This document records the frontend's current domain and the backend's verified local capabilities to guide a future integration milestone. It does not define an implemented API contract.
+This document records the frontend's current domain, backend's verified local capabilities, and the limited implemented pre-production validation contract. Other business API boundaries remain proposals.
 
-No business API is implemented. The only route is the local health check described above; it does not connect the Next.js frontend to Python, transmit business data, persist state, or enable generation. The existing CLI commands are not HTTP interfaces and must not be treated as such.
+The validation route accepts caller-submitted facts, a brief, and storyboard, then applies strict schema checks and derives runtime. It does not connect the Next.js frontend to Python, persist state, or enable generation. The existing CLI commands are not HTTP interfaces and must not be treated as such.
 
 ## 2. Current architecture and verified capabilities
 
 The frontend is a Next.js App Router application. The Northstar route layout wraps its nested pages in `NorthstarDemoProjectProvider` (`frontend/src/app/projects/sample-northstar/layout.tsx`). The provider holds facts, brief, and storyboard scenes in React state (`frontend/src/app/projects/sample-northstar/demo-project-provider.tsx`). This state is shared during client navigation within those routes and resets when the page is refreshed. The production package preview explicitly says no data is sent to a backend (`frontend/src/app/projects/sample-northstar/package/production-package-preview.tsx`, `ProductionPackagePreview`).
 
-The Python package is a local Python 3.11 package with CLI entry points and a minimal FastAPI application (`backend/pyproject.toml`, `backend/adforge_renderer/api.py`). The app exposes only `GET /health`; it does not expose the CLI workflows or any business operation over HTTP. Its response confirms only that the HTTP app is responding.
+The Python package is a local Python 3.11 package with CLI entry points and a minimal FastAPI application (`backend/pyproject.toml`, `backend/adforge_renderer/api.py`). The app exposes `GET /health` and the structural `POST /validate/preproduction`; it does not expose CLI workflows over HTTP. The health response confirms only that the HTTP app is responding.
 
 Verified local workflows:
 
@@ -41,7 +41,7 @@ The current client eligibility calculation is `getApprovedDemoFacts`, which sele
 
 ## 4. Existing backend interfaces
 
-The only existing HTTP interface is `GET /health` (`backend/adforge_renderer/api.py`, `health`); it is not a business API and accepts no business data. The following are confirmed local JSON/CLI interfaces only.
+The existing HTTP interfaces are `GET /health` and `POST /validate/preproduction` (`backend/adforge_renderer/api.py`); the latter accepts only caller-supplied structural validation inputs, as specified in §5A. The following other interfaces are confirmed local JSON/CLI interfaces only.
 
 ### Website scan
 
@@ -63,11 +63,11 @@ The scanner's verified threat surface, no-go decision, candidate architectures, 
 
 ### Errors and operations
 
-The CLIs report errors on stderr and through process exit codes; there is no HTTP error contract for business operations. `scan_website` catches failures into bounded `ScanResult` error codes/messages. The render CLIs catch selected validation, I/O, and renderer errors. No authentication, authorization, job queue, managed server lifecycle, rate limiting, or remote artifact store is implemented. These characteristics are confirmed in `scan_cli.py`, `creative_cli.py`, `cli.py`, and `website_scan.py`; they are not API guarantees.
+The CLIs report errors on stderr and through process exit codes. The validation endpoint's bounded HTTP errors are specified in §5A; there are no HTTP error contracts for scan, generation, or rendering operations because those routes are absent. `scan_website` catches failures into bounded `ScanResult` error codes/messages. The render CLIs catch selected validation, I/O, and renderer errors. No authentication, authorization, job queue, managed server lifecycle, rate limiting, or remote artifact store is implemented. These characteristics are confirmed in `scan_cli.py`, `creative_cli.py`, `cli.py`, and `website_scan.py`; they are not API guarantees.
 
-### Typed integration schemas (implemented locally; no API)
+### Typed integration schemas and validation API
 
-`backend/adforge_renderer/integration_schemas.py` defines strict Pydantic schemas and pure validation helpers for future contract work. They are not wired into FastAPI, a CLI, persistence, generation, or rendering. The API still exposes only `GET /health`; `/scan` and all other business endpoints remain absent. `validate_contract_input` accepts supplied Python/JSON-shaped data and returns a deterministic validity flag, sanitized field paths/codes, and a derived runtime when all scene data is valid. It performs no network, filesystem, subprocess, generation, or rendering operations.
+`backend/adforge_renderer/integration_schemas.py` defines strict Pydantic schemas and pure validation helpers. `POST /validate/preproduction` uses those schemas and `validate_contract_input`; it does not add persistence, generation, or rendering. `/scan` and all other business endpoints remain absent. The helper accepts supplied Python/JSON-shaped data and returns a deterministic validity flag, sanitized field paths/codes, and a derived runtime when all scene data is valid. It performs no network, filesystem, subprocess, generation, or rendering operations.
 
 The implemented schemas are intentionally frontend-shaped:
 
@@ -77,7 +77,7 @@ The implemented schemas are intentionally frontend-shaped:
 
 Schemas reject extra keys, non-string text, numeric strings/fractional/bool durations, invalid enums, missing required properties, duplicate IDs/references, and out-of-bound values. Values are not silently coerced or trimmed. Current implemented bounds: at most 32 claims, 20 text revisions per claim, 32 relied-upon fact IDs, and 32 scenes; claim/original/revision text 240 characters; category 80; source reference 2,048, section 240, excerpt 240; required brief text 500 and value proposition 500; scene title 120, visual direction/narration 1,000, and the other scene text fields 500; IDs 64. Extra-key names are redacted from the helper's issue paths. These are bounded integration-schema values, not yet agreed user-facing limits; 32 claim capacity and 240-character facts follow existing backend precedent, while the scene and brief limits are proposed and need frontend/product confirmation before a connected workflow.
 
-The Python model deliberately differs from existing backend `BusinessFact`: this schema uses the frontend field names and text revision array, while `BusinessFact` uses `fact_id`, `field`, `value`, structured `provenance`, `review_state`, and `supersedes_fact_id`. The frontend currently supports only illustrative-placeholder source objects, while the integration schema additionally permits backend-like source kinds; the mapping must translate reference/page/section/evidence fields without losing provenance. Frontend scene schema has no maximum collection size, whereas this new schema proposes 32. No project identity/version, concurrency token, persistence, authority to approve, source verification, or API request/response contract is introduced here. Schema validation checks structure only; it neither establishes claim truth nor converts review status into proof. See [`website-fetching-threat-model.md`](website-fetching-threat-model.md) for the separate no-go decision and security gates for any future website-fetch endpoint.
+The Python model deliberately differs from existing backend `BusinessFact`: this schema uses the frontend field names and text revision array, while `BusinessFact` uses `fact_id`, `field`, `value`, structured `provenance`, `review_state`, and `supersedes_fact_id`. The frontend currently supports only illustrative-placeholder source objects, while the integration schema additionally permits backend-like source kinds; the mapping must translate reference/page/section/evidence fields without losing provenance. Frontend scene schema has no maximum collection size, whereas this schema bounds it to 32. No project identity/version, concurrency token, persistence, authority to approve, or source verification is introduced. The API request/response shape is specified separately in §5A. Schema validation checks structure only; it neither establishes claim truth nor converts review status into proof. See [`website-fetching-threat-model.md`](website-fetching-threat-model.md) for the separate no-go decision and security gates for any future website-fetch endpoint.
 
 #### Compatibility verification (Phase 6D.2)
 
@@ -93,7 +93,76 @@ The following are verified mapping differences, not silently resolved by these t
 - Frontend pre-production validation is stricter than Python structural schema validation in specific places: it blocks `requirementsConfirmed: false`, empty storyboards, and scenes without a narrative purpose. Python intentionally accepts a false confirmation as a boolean and an empty storyboard as structurally valid (with no runtime); its scene schema requires the `narrativePurpose` key but permits an empty string. The frontend readiness function also detects unknown enum values, missing required brief text, duplicate IDs, and invalid durations at runtime; these checks are readiness behavior, not validation performed by TypeScript's erased types.
 - Python rejects extra keys and coercible types. The frontend helper ignores unknown object properties at runtime; compile-time excess-property checking applies only in certain typed literal contexts and is not an input security boundary. The helper's current numeric duration check rejects fractional values, strings, and values outside 1–60.
 
-Automated frontend evidence is limited to the valid fixture's TypeScript assignability and execution of current frontend helper functions from Node after compiling them with the existing compiler. Invalid JSON fixture variants are not typechecked against compile-time types because the frontend has no runtime schema validator; the runtime readiness helper was exercised for the documented mutations. Python Pydantic tests exercise actual runtime acceptance/rejection. None of these checks establish authorization, claim verification, or API compatibility: no endpoint accepts these schemas, and no frontend/backend network connection exists.
+Automated frontend evidence is limited to the valid fixture's TypeScript assignability and execution of current frontend helper functions from Node after compiling them with the existing compiler. Invalid JSON fixture variants are not typechecked against compile-time types because the frontend has no runtime schema validator; the runtime readiness helper was exercised for the documented mutations. Python Pydantic tests exercise actual runtime acceptance/rejection. These checks do not establish authorization or claim verification. The validation API now accepts the documented Python schema; no frontend/backend network connection exists.
+
+### 5A. Implemented pre-production validation endpoint (Phase 6E.1)
+
+`POST /validate/preproduction` is the only business-data HTTP endpoint. It is read-only, deterministic, and evaluates each request independently. The server is still bound to `127.0.0.1` by default. The endpoint accepts only the following top-level keys; each nested object is checked by the existing `BusinessClaims`, `CreativeBrief`, and `StoryboardInput` schemas through `validate_contract_input`:
+
+```json
+{
+  "facts": { "facts": [] },
+  "brief": {
+    "objective": "awareness",
+    "targetAudience": "People looking for a considered everyday cup",
+    "productOrOffer": "Small-batch roasted coffee",
+    "keyMessage": "A good cup, made simple.",
+    "valueProposition": "",
+    "platform": "instagram",
+    "aspectRatio": "9:16",
+    "duration": 15,
+    "tone": "Warm, considered, and clear",
+    "callToAction": "Learn more",
+    "reliedUponFactIds": [],
+    "requirementsConfirmed": false
+  },
+  "storyboard": {
+    "scenes": [
+      {
+        "id": "scene-one",
+        "title": "Opening",
+        "narrativePurpose": "Set the tone",
+        "visualDirection": "Illustrative visual direction",
+        "onScreenText": "",
+        "narration": "",
+        "durationSeconds": 15,
+        "transitionNote": ""
+      }
+    ]
+  }
+}
+```
+
+The `facts` wrapper is required because the pure helper validates `BusinessClaims`; its `facts` list may be empty. When supplied, all facts and provenance are caller-provided and are not independently verified. The endpoint does not load the frontend's in-memory state. It accepts `requirementsConfirmed` as a structural boolean only; `false` is valid and `true` is not evidence that the brief is factual. Caller-provided review status is likewise not verification or authorization.
+
+A schema-valid response has exactly this shape (runtime is calculated from all submitted scene durations by `calculate_storyboard_runtime`):
+
+```json
+{
+  "valid": true,
+  "issues": [],
+  "plannedRuntimeSeconds": 15
+}
+```
+
+An empty scene list is structurally valid and returns `plannedRuntimeSeconds: null`. Any invalid scene makes the request invalid; no partial runtime is reported. Invalid nested contract data returns HTTP 422 with the existing sanitized issue semantics:
+
+```json
+{
+  "detail": "Request does not match the supported pre-production contract.",
+  "issues": [
+    {
+      "path": "storyboard.scenes.0.durationSeconds",
+      "code": "greater_than_equal",
+      "message": "Value does not match the supported contract."
+    }
+  ]
+}
+```
+
+Malformed JSON, missing top-level fields, wrong top-level types, and unknown top-level fields return HTTP 422 with `{"detail":"Invalid request body."}`. Error responses do not echo submitted values or exception text. Unexpected validation failures are logged only with a fixed event and exception class, and return HTTP 500 with `{"detail":"Pre-production validation could not be completed."}`. `GET /health` is unchanged.
+
+The response intentionally has no severity, suggested action, readiness counters, or readiness status: the existing backend `ValidationIssue` has only `path`, `code`, and a generic safe `message`, and `validate_contract_input` is a structural validator, not a pre-production readiness engine. A 200 response means only that inputs match the documented structural contract. It does not mean the brief is confirmed, facts are approved for factual use, claims are grounded, or an ad is ready. The validator does not cross-check relied-upon fact IDs against supplied facts, compare storyboard runtime to the brief's target duration, or determine whether a claim is factually supported. No client-supplied runtime/readiness field is accepted. No HTTP client, filesystem, subprocess, persistence, scanning, generation, rendering, export, or frontend integration is used.
 
 ## 5. Frontend/backend compatibility matrix
 
@@ -104,10 +173,10 @@ Automated frontend evidence is limited to the valid fixture's TypeScript assigna
 | Human review and fact corrections | **Partial / incompatible shape** | Backend `BusinessFacts.approve`, `.reject`, and `.correct` model decisions and linked superseding IDs; frontend uses `id/category/claim/revisions[]`. No API maps these shapes or persists review decisions. |
 | Brief editing and confirmation | **Missing backend support** | Frontend `CreativeBrief` has no corresponding backend brief model or CLI input. Backend confirmation semantics are absent. |
 | Storyboard editing and scene timing | **Partial / incompatible** | Backend `CreativeScene` supports ordered role, on-screen text, support description, and fact IDs. It has neither the frontend scene schema nor its duration/timing validation. |
-| Pre-production readiness findings | **Missing backend equivalent** | `validateNorthstarPreproduction` is frontend-only. Backend has no corresponding unified validator or findings contract. |
+| Pre-production readiness findings | **Structural validation only** | `POST /validate/preproduction` checks the submitted schemas and derives runtime. `validateNorthstarPreproduction` findings, severity, suggested actions, and readiness summaries remain frontend-only; no equivalent backend readiness engine exists. |
 | Deterministic creative generation | **Supported locally, not as a service** | `generate_creative` and `creative_cli` operate on `BusinessFacts` JSON. No HTTP generation endpoint; output schema is not the frontend storyboard. |
 | MP4 rendering | **Supported locally, not as a service** | `render_ad` and CLI produce a local MP4 from `BusinessInput`; fixed output profile/time does not match editable frontend target aspect ratio/runtime. |
-| Persistent projects, jobs, artifacts, auth | **Missing** | No business API, persistence, job model, identity, or artifact download endpoint appears in the backend package. |
+| Persistent projects, jobs, artifacts, auth | **Missing** | No project-management API, persistence, job model, identity, or artifact download endpoint appears in the backend package. |
 
 ## 6. Proposed future API boundaries
 

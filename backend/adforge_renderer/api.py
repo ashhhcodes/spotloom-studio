@@ -4,8 +4,20 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, StrictStr
+
+from adforge_renderer.integration_schemas import (
+    PreproductionValidationRequest,
+    validate_contract_input,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI(
@@ -16,10 +28,73 @@ app = FastAPI(
 )
 
 
+class ValidationIssueResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    path: StrictStr
+    code: StrictStr
+    message: StrictStr
+
+
+class PreproductionValidationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    valid: StrictBool
+    issues: list[ValidationIssueResponse]
+    plannedRuntimeSeconds: StrictInt | None
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(
+    _request: Request, _error: RequestValidationError,
+) -> JSONResponse:
+    """Return a stable 422 without reflecting submitted values or internal details."""
+    return JSONResponse(status_code=422, content={"detail": "Invalid request body."})
+
+
 @app.get("/health", include_in_schema=False)
 def health() -> dict[str, str]:
     """Report that this HTTP application is responding."""
     return {"status": "ok"}
+
+
+@app.post(
+    "/validate/preproduction",
+    response_model=PreproductionValidationResponse,
+)
+def validate_preproduction(
+    payload: PreproductionValidationRequest,
+) -> PreproductionValidationResponse | JSONResponse:
+    """Validate caller-supplied structures and derive runtime without side effects."""
+    try:
+        result = validate_contract_input(
+            facts=payload.facts,
+            brief=payload.brief,
+            storyboard=payload.storyboard,
+        )
+        if not result.valid:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": "Request does not match the supported pre-production contract.",
+                    "issues": [
+                        {"path": issue.path, "code": issue.code, "message": issue.message}
+                        for issue in result.issues
+                    ],
+                },
+            )
+        return PreproductionValidationResponse(
+            valid=True,
+            issues=[],
+            plannedRuntimeSeconds=result.plannedRuntimeSeconds,
+        )
+    except Exception as error:
+        # Log only a fixed event and exception class; exception text may contain input.
+        logger.error("Pre-production validation failed (%s).", type(error).__name__)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Pre-production validation could not be completed."},
+        )
 
 
 def _loopback_host(value: str) -> str:

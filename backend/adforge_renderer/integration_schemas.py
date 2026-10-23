@@ -171,6 +171,14 @@ class StoryboardInput(_ContractModel):
         return self
 
 
+class PreproductionValidationRequest(_ContractModel):
+    """Strict request envelope; nested contracts are validated by the pure helper."""
+
+    facts: dict[str, object]
+    brief: dict[str, object]
+    storyboard: dict[str, object]
+
+
 @dataclass(frozen=True)
 class ValidationIssue:
     """Sanitized, deterministic validation issue without rejected input values."""
