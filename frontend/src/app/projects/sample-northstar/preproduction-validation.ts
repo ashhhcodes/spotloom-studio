@@ -5,7 +5,7 @@ import {
   type ReviewStatus,
 } from "./review/demo-facts";
 import type { CreativeBrief } from "./creative-brief";
-import type { StoryboardScene } from "./storyboard-model";
+import { calculateStoryboardRuntime, isValidStoryboardDuration, type StoryboardScene } from "./storyboard-model";
 
 export type FindingSeverity = "blocker" | "warning" | "info";
 export type FindingCategory = "brief" | "facts" | "storyboard" | "runtime" | "grounding" | "production";
@@ -77,10 +77,6 @@ function nonEmpty(value: unknown): value is string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function validSceneDuration(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 60;
 }
 
 /** Exact, case-insensitive, whitespace-normalized matching only. This is not semantic grounding. */
@@ -346,7 +342,7 @@ export function validateNorthstarPreproduction(
         affectedSceneId: sceneId,
       });
     }
-    if (!validSceneDuration(scene.durationSeconds)) {
+    if (!isValidStoryboardDuration(scene.durationSeconds)) {
       invalidDurationIds.push(sceneId);
       addFinding(findings, {
         id: `storyboard.duration-invalid.${sceneId}`,
@@ -365,7 +361,7 @@ export function validateNorthstarPreproduction(
   const targetDuration = isOneOf(briefRecord.duration, briefDurations) ? briefRecord.duration : null;
   const hasInvalidSceneDuration = invalidDurationIds.length > 0 || validScenes.length !== rawScenes.length;
   const plannedRuntime = rawScenes.length > 0 && !hasInvalidSceneDuration
-    ? validScenes.reduce((total, scene) => total + (scene.durationSeconds as number), 0)
+    ? calculateStoryboardRuntime(validScenes.map((scene) => scene.durationSeconds))
     : null;
   const runtimeDifference = plannedRuntime !== null && targetDuration !== null
     ? plannedRuntime - targetDuration

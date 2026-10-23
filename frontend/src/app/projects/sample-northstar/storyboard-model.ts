@@ -9,6 +9,17 @@ export type StoryboardScene = {
   transitionNote: string;
 };
 
+/** A scene duration is valid for planning only when it is a whole second from 1 to 60. */
+export function isValidStoryboardDuration(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 60;
+}
+
+/** Sum a complete set of valid scene durations; return null when no reliable runtime exists. */
+export function calculateStoryboardRuntime(durations: readonly unknown[]): number | null {
+  if (durations.length === 0 || !durations.every(isValidStoryboardDuration)) return null;
+  return durations.reduce<number>((total, duration) => total + (duration as number), 0);
+}
+
 /** Illustrative creative planning only; no footage, narration, or advertisement exists. */
 export const initialNorthstarStoryboard: StoryboardScene[] = [
   {

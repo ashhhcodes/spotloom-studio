@@ -2,15 +2,12 @@
 
 import Link from "next/link";
 import { useNorthstarProjectState } from "../demo-project-provider";
-
-function validDuration(value: number) {
-  return Number.isInteger(value) && value >= 1 && value <= 60;
-}
+import { calculateStoryboardRuntime, isValidStoryboardDuration } from "../storyboard-model";
 
 export default function StoryboardWorkspace() {
   const { brief, scenes, updateScene, addScene, deleteScene, moveScene, resetStoryboard } = useNorthstarProjectState();
-  const totalRuntime = scenes.reduce((total, scene) => total + scene.durationSeconds, 0);
-  const invalidSceneCount = scenes.filter((scene) => !scene.title.trim() || !validDuration(scene.durationSeconds)).length;
+  const plannedRuntime = calculateStoryboardRuntime(scenes.map((scene) => scene.durationSeconds));
+  const invalidSceneCount = scenes.filter((scene) => !scene.title.trim() || !isValidStoryboardDuration(scene.durationSeconds)).length;
 
   function confirmReset() {
     if (window.confirm("Reset the storyboard to its illustrative Northstar demo scenes?")) resetStoryboard();
@@ -39,7 +36,7 @@ export default function StoryboardWorkspace() {
 
       <section className="storyboard-overview" aria-label="Storyboard summary" aria-live="polite">
         <div><span>Scenes</span><strong>{scenes.length}</strong></div>
-        <div><span>Planned runtime</span><strong>{totalRuntime} sec</strong></div>
+        <div><span>Planned runtime</span><strong>{plannedRuntime === null ? "Unavailable" : `${plannedRuntime} sec`}</strong></div>
         <div><span>Brief target</span><strong>{brief.duration} sec</strong></div>
         <div><span>Aspect ratio</span><strong>{brief.aspectRatio}</strong></div>
       </section>
@@ -56,7 +53,7 @@ export default function StoryboardWorkspace() {
               const durationId = `storyboard-duration-${scene.id}`;
               const durationErrorId = `${durationId}-error`;
               const titleInvalid = !scene.title.trim();
-              const durationInvalid = !validDuration(scene.durationSeconds);
+              const durationInvalid = !isValidStoryboardDuration(scene.durationSeconds);
               return (
                 <li className="storyboard-scene" key={scene.id}>
                   <article>

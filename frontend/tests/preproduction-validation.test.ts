@@ -8,9 +8,11 @@ import {
 } from "../src/app/projects/sample-northstar/review/demo-facts";
 import { initialNorthstarBrief, type CreativeBrief } from "../src/app/projects/sample-northstar/creative-brief";
 import {
+  calculateStoryboardRuntime,
   appendStoryboardScene,
   cloneInitialStoryboard,
   deleteStoryboardScene,
+  isValidStoryboardDuration,
   moveStoryboardScene,
   type StoryboardScene,
 } from "../src/app/projects/sample-northstar/storyboard-model";
@@ -161,6 +163,20 @@ test("invalid whole-second duration blocks readiness and makes planned runtime u
   assert.ok(findById(result.findings, `storyboard.duration-invalid.${scenes[0].id}`));
   assert.equal(result.storyboardSummary.plannedRuntimeSeconds, null);
   assert.equal(result.storyboardSummary.runtimeUnavailableReason, "invalid-scene-duration");
+});
+
+test("storyboard runtime rejects empty, fractional, and out-of-range durations", () => {
+  assert.equal(calculateStoryboardRuntime([]), null);
+  assert.equal(calculateStoryboardRuntime([1, 60]), 61);
+  assert.equal(calculateStoryboardRuntime([1, 2.5]), null);
+  assert.equal(calculateStoryboardRuntime([1, 0]), null);
+  assert.equal(calculateStoryboardRuntime([1, 61]), null);
+  assert.equal(calculateStoryboardRuntime([Number.NaN]), null);
+  assert.equal(isValidStoryboardDuration(1), true);
+  assert.equal(isValidStoryboardDuration(60), true);
+  assert.equal(isValidStoryboardDuration(0), false);
+  assert.equal(isValidStoryboardDuration(61), false);
+  assert.equal(isValidStoryboardDuration(1.5), false);
 });
 
 test("runtime mismatch is derived in seconds without modifying source data", () => {
