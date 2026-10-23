@@ -46,6 +46,24 @@
 .status-unreviewed { color: var(--warning); }
 .status-approved { color: var(--success); }
 .status-rejected { color: var(--danger); }
+.review-persistence-note { margin: 1.1rem 0 0; padding: 0.7rem 0.8rem; border-left: 2px solid var(--accent-strong); background: var(--surface); color: var(--ink-soft); font-size: 0.75rem; }
+.review-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.75rem; }
+.review-action { min-height: 2.25rem; padding: 0.45rem 0.62rem; border: 1px solid var(--line-strong); background: var(--canvas); color: var(--ink); font: inherit; font-size: 0.7rem; font-weight: 650; cursor: pointer; }
+.review-action:hover { border-color: var(--accent-strong); color: var(--accent-strong); }
+.review-action-primary { border-color: var(--success); color: var(--success); }
+.review-action-reject { border-color: var(--danger); color: var(--danger); }
+.review-edit-form { display: grid; gap: 0.55rem; margin-top: 0.7rem; }
+.review-edit-form label { color: var(--ink-soft); font-size: 0.75rem; font-weight: 650; }
+.review-edit-form textarea { width: 100%; min-height: 5rem; padding: 0.65rem; resize: vertical; border: 1px solid var(--line-strong); border-radius: 0; background: var(--canvas); color: var(--ink); font: inherit; font-size: 0.9rem; line-height: 1.4; }
+.review-edit-form textarea:focus-visible, .review-action:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 3px; }
+.review-original-claim { margin: 0; color: var(--ink-soft); font-size: 0.74rem; line-height: 1.45; }
+.review-edit-error { margin: 0; color: var(--danger); font-size: 0.75rem; }
+.review-revision-history { margin-top: 0.65rem; color: var(--muted); font-size: 0.72rem; }
+.review-revision-history summary { width: fit-content; cursor: pointer; text-decoration: underline; text-underline-offset: 0.2em; }
+.review-revision-history ol { margin: 0.45rem 0 0; padding-left: 1.2rem; }
+.review-revision-history li { padding-block: 0.15rem; overflow-wrap: anywhere; }
+.review-live-message { min-height: 1.2rem; margin: 0.6rem 0 0; color: var(--ink-soft); font-size: 0.75rem; }
+.review-next-step > div:first-child > p + p { margin-top: 0.55rem; }
 .review-next-step { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(17rem, 0.8fr); align-items: center; gap: 2rem; margin-top: clamp(2.5rem, 5vw, 4rem); padding: clamp(1.2rem, 3vw, 2rem); border: 1px solid var(--line); background: var(--surface); }
 .review-next-step .review-kicker { margin-bottom: 0.4rem; }
 .review-next-step > div:first-child > p:last-child { max-width: 42rem; margin: 0.55rem 0 0; color: var(--muted); font-size: 0.82rem; }
