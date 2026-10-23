@@ -32,6 +32,7 @@
 .start-aside p { margin: 0; color: var(--muted); font-size: 0.82rem; }
 .start-aside .secondary-action { width: 100%; }
 .inline-status { margin-top: 1rem; padding: 0.8rem 0.9rem; border-left: 3px solid var(--success); background: var(--surface-raised); color: var(--ink-soft); font-size: 0.8rem; }
+.inline-status[data-kind="error"] { border-left-color: var(--danger); }
 .inline-status strong { color: var(--ink); }
 .projects-section { padding-top: clamp(3rem, 7vw, 6rem); }
 .projects-heading { display: flex; align-items: end; justify-content: space-between; gap: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--line); }
@@ -43,9 +44,9 @@
 .sample-project h3 { margin: 0; font-family: var(--font-editorial); font-size: 1.45rem; font-weight: 400; }
 .sample-project p { margin: 0.25rem 0 0; color: var(--muted); font-size: 0.8rem; }
 .sample-badge { padding: 0.35rem 0.55rem; border: 1px solid var(--line-strong); color: var(--ink-soft); font-size: 0.65rem; font-weight: 650; }
-.manual-dialog { width: min(100% - 2rem, 30rem); padding: 0; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
-.manual-dialog::backdrop { background: rgb(15 16 14 / 55%); }
-.dialog-content { padding: 1.5rem; }
+.manual-dialog { position: fixed; inset: 0; z-index: 1000; width: min(30rem, calc(100vw - 2rem)); max-width: calc(100vw - 2rem); max-height: calc(100vh - 2rem); max-height: calc(100dvh - 2rem); margin: auto; overflow-y: auto; padding: 0; border: 1px solid var(--line-strong); border-radius: var(--corner-sm); background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.manual-dialog::backdrop { background: rgb(15 16 14 / 32%); }
+.dialog-content { padding: clamp(1rem, 4vw, 1.5rem); }
 .dialog-head { display: flex; align-items: start; justify-content: space-between; gap: 1rem; margin-bottom: 1.3rem; }
 .dialog-head h2 { margin: 0; font-family: var(--font-editorial); font-size: 1.8rem; font-weight: 400; }
 .dialog-head p { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.82rem; }
