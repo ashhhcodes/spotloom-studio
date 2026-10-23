@@ -129,7 +129,7 @@ export default function FactReviewWorkspace() {
 
       <section className="review-next-step" aria-labelledby="next-step-heading">
         <div><p className="review-kicker">What comes next</p><h2 id="next-step-heading">Reviewed facts can guide creative work.</h2><p>Readiness in this demo: {approvedCount} of {facts.length} illustrative claims marked approved. Rejected claims are never counted as approved.</p><p>These sample decisions cannot authorize real creative. Real extraction, evidence review, and a connected backend are required first.</p></div>
-        <div className="review-next-control"><button type="button" disabled aria-describedby="next-step-note">Continue to creative work <span aria-hidden="true">↗</span></button><p id="next-step-note">Unavailable in this frontend-only demo. No creative will be generated.</p><Link className="review-readiness-link" href="/projects/sample-northstar/creative">See the illustrative readiness details <span aria-hidden="true">↗</span></Link></div>
+        <div className="review-next-control"><button type="button" disabled aria-describedby="next-step-note">Continue to creative work <span aria-hidden="true">↗</span></button><p id="next-step-note">Unavailable in this frontend-only demo. No creative will be generated.</p><Link className="review-readiness-link" href="/projects/sample-northstar/creative">See the illustrative readiness details <span aria-hidden="true">↗</span></Link><Link className="review-readiness-link" href="/projects/sample-northstar/brief">Build an illustrative creative brief <span aria-hidden="true">↗</span></Link></div>
       </section>
     </>
   );

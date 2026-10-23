@@ -83,7 +83,7 @@ export default function CreativeReadinessWorkspace() {
 
       <section className="readiness-next-step" aria-labelledby="readiness-next-title">
         <div><p className="readiness-kicker">Generation unavailable</p><h2 id="readiness-next-title">No advertisement can be generated from this sample.</h2><p>The creative editor, real source evidence, and backend persistence are not implemented. Nothing on this page sends data or starts generation.</p></div>
-        <div className="readiness-next-actions"><button type="button" disabled aria-describedby="readiness-disabled-note">Create an advertisement <span aria-hidden="true">↗</span></button><p id="readiness-disabled-note">Unavailable until real facts can be sourced, reviewed, and supplied to an implemented workflow.</p><Link href="/projects/sample-northstar/review">Return to fact review <span aria-hidden="true">←</span></Link></div>
+        <div className="readiness-next-actions"><button type="button" disabled aria-describedby="readiness-disabled-note">Create an advertisement <span aria-hidden="true">↗</span></button><p id="readiness-disabled-note">Unavailable until real facts can be sourced, reviewed, and supplied to an implemented workflow.</p><Link href="/projects/sample-northstar/review">Return to fact review <span aria-hidden="true">←</span></Link><Link href="/projects/sample-northstar/brief">Plan an illustrative creative brief <span aria-hidden="true">↗</span></Link></div>
       </section>
 
       <footer className="readiness-footer"><p>Demo only · No claims were extracted, verified, or saved.</p><Link href="/projects/sample-northstar">Northstar sample project</Link></footer>

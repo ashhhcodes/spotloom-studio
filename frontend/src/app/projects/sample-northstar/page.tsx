@@ -43,6 +43,7 @@ export default function NorthstarSamplePage() {
         <p>This sample does not represent extracted or verified business information.</p>
         <div className="sample-detail-actions">
           <Link className="sample-review-action" href="/projects/sample-northstar/review">View illustrative fact review <span aria-hidden="true">↗</span></Link>
+          <Link className="sample-review-action" href="/projects/sample-northstar/brief">Build a creative brief <span aria-hidden="true">↗</span></Link>
           <Link className="sample-return-action" href="/#overview">Return to Overview <span aria-hidden="true">↗</span></Link>
         </div>
       </footer>
