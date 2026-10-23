@@ -46,7 +46,10 @@ export default function NorthstarSamplePage() {
 
       <footer className="sample-detail-footer">
         <p>This sample does not represent extracted or verified business information.</p>
-        <Link className="sample-return-action" href="/#overview">Return to Overview <span aria-hidden="true">↗</span></Link>
+        <div className="sample-detail-actions">
+          <Link className="sample-review-action" href="/projects/sample-northstar/review">View illustrative fact review <span aria-hidden="true">↗</span></Link>
+          <Link className="sample-return-action" href="/#overview">Return to Overview <span aria-hidden="true">↗</span></Link>
+        </div>
       </footer>
     </div>
   );
