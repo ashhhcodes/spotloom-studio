@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { initialDemoFacts, type ReviewStatus } from "../review/demo-facts";
+import { getApprovedDemoFacts, northstarDemoProject, type ReviewStatus } from "../review/demo-facts";
 import "./creative.css";
 
 export const metadata: Metadata = {
@@ -9,10 +9,11 @@ export const metadata: Metadata = {
 };
 
 const statusDetails: Record<ReviewStatus, { icon: string; className: string }> = {
-  Unreviewed: { icon: "○", className: "readiness-unreviewed" },
-  Approved: { icon: "✓", className: "readiness-approved" },
-  Rejected: { icon: "×", className: "readiness-rejected" },
+  unreviewed: { icon: "○", className: "readiness-unreviewed" },
+  approved: { icon: "✓", className: "readiness-approved" },
+  rejected: { icon: "×", className: "readiness-rejected" },
 };
+const statusLabels: Record<ReviewStatus, string> = { unreviewed: "Unreviewed", approved: "Approved", rejected: "Rejected" };
 
 const blockers = [
   { title: "Real source extraction", description: "No Northstar website has been scanned. The facts shown here are sample copy only." },
@@ -21,7 +22,7 @@ const blockers = [
 ];
 
 export default function NorthstarCreativeReadinessPage() {
-  const approvedCount = initialDemoFacts.filter((fact) => fact.status === "Approved").length;
+  const approvedCount = getApprovedDemoFacts(northstarDemoProject.facts).length;
 
   return (
     <div className="creative-readiness-page">
@@ -34,7 +35,7 @@ export default function NorthstarCreativeReadinessPage() {
       </nav>
 
       <header className="readiness-heading">
-        <p className="readiness-kicker">Northstar Coffee <span aria-hidden="true">/</span> Illustrative sample</p>
+        <p className="readiness-kicker">{northstarDemoProject.name} <span aria-hidden="true">/</span> Illustrative sample</p>
         <h1>Ready for creative?<br /><em>Not yet.</em></h1>
         <p>This sample has a starting review snapshot, but no real business facts or evidence. It cannot authorize an advertisement.</p>
       </header>
@@ -47,7 +48,7 @@ export default function NorthstarCreativeReadinessPage() {
       <section className="readiness-summary" aria-labelledby="readiness-summary-title">
         <div className="readiness-summary-copy">
           <p className="readiness-kicker">Current sample snapshot</p>
-          <h2 id="readiness-summary-title">{approvedCount} of {initialDemoFacts.length} facts marked approved for this demo</h2>
+          <h2 id="readiness-summary-title">{approvedCount} of {northstarDemoProject.facts.length} facts marked approved for this demo</h2>
           <p>“Approved” here describes only the illustrative sample state. It does not mean a claim is verified or approved for real advertising.</p>
         </div>
         <p className="readiness-verdict"><span aria-hidden="true">×</span><strong>Not ready for real creative</strong><small>3 prerequisites remain</small></p>
@@ -56,9 +57,9 @@ export default function NorthstarCreativeReadinessPage() {
       <section className="readiness-facts" aria-labelledby="readiness-facts-title">
         <div className="readiness-section-heading"><div><p className="readiness-kicker">Business context</p><h2 id="readiness-facts-title">What the sample review says</h2></div><p>Illustrative claims only · no evidence collected</p></div>
         <ul>
-          {initialDemoFacts.map((fact) => {
+          {northstarDemoProject.facts.map((fact) => {
             const detail = statusDetails[fact.status];
-            return <li className="readiness-fact" key={fact.id}><div><p className="readiness-fact-category">{fact.category} <span>·</span> Demo claim</p><h3>{fact.claim}</h3></div><span className={`readiness-status ${detail.className}`}><span aria-hidden="true">{detail.icon}</span>{fact.status}</span><p className="readiness-use-note">{fact.status === "Approved" ? "Marked approved in the demo only; not verified for real-world use." : fact.status === "Rejected" ? "Rejected sample claim. It must not be used in creative copy." : "Unreviewed sample claim. It is not available for creative use."}</p></li>;
+            return <li className="readiness-fact" key={fact.id}><div><p className="readiness-fact-category">{fact.category} <span>·</span> Demo claim</p><h3>{fact.claim}</h3></div><span className={`readiness-status ${detail.className}`}><span aria-hidden="true">{detail.icon}</span>{statusLabels[fact.status]}</span><p className="readiness-use-note">{fact.status === "approved" ? "Marked approved in the demo only; not verified for real-world use." : fact.status === "rejected" ? "Rejected sample claim. It must not be used in creative copy." : "Unreviewed sample claim. It is not available for creative use."}</p></li>;
           })}
         </ul>
       </section>

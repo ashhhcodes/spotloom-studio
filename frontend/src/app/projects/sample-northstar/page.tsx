@@ -1,17 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { northstarDemoProject } from "./review/demo-facts";
 import "./sample-project.css";
 
 export const metadata: Metadata = {
   title: "Northstar Coffee sample — Spotloom Studio",
   description: "An illustrative read-only sample project in Spotloom Studio.",
 };
-
-const illustrativeFacts = [
-  { label: "Product", value: "Small-batch roasted coffee" },
-  { label: "Audience", value: "People looking for a considered everyday cup" },
-  { label: "Possible message", value: "A good cup, made simple." },
-];
 
 export default function NorthstarSamplePage() {
   return (
@@ -34,10 +29,10 @@ export default function NorthstarSamplePage() {
           <span>READ ONLY</span>
         </div>
         <dl>
-          {illustrativeFacts.map((fact) => (
-            <div className="sample-fact-row" key={fact.label}>
-              <dt>{fact.label}</dt>
-              <dd>{fact.value}</dd>
+          {northstarDemoProject.facts.map((fact) => (
+            <div className="sample-fact-row" key={fact.id}>
+              <dt>{fact.category}</dt>
+              <dd>{fact.claim}</dd>
               <span className="illustrative-tag">Illustrative</span>
             </div>
           ))}

@@ -2,34 +2,32 @@
 
 import { useState, type FormEvent } from "react";
 import Link from "next/link";
-import { initialDemoFacts, type DemoFact, type ReviewStatus } from "./demo-facts";
+import { correctDemoFact, deriveReviewStatusCounts, getApprovedDemoFacts, northstarDemoProject, type ProjectFact, type ReviewStatus } from "./demo-facts";
 
-const statuses: ReviewStatus[] = ["Unreviewed", "Approved", "Rejected"];
+const statuses: ReviewStatus[] = ["unreviewed", "approved", "rejected"];
+const statusLabels: Record<ReviewStatus, string> = { unreviewed: "Unreviewed", approved: "Approved", rejected: "Rejected" };
 const statusDetails: Record<ReviewStatus, { icon: string; className: string }> = {
-  Unreviewed: { icon: "○", className: "status-unreviewed" },
-  Approved: { icon: "✓", className: "status-approved" },
-  Rejected: { icon: "×", className: "status-rejected" },
+  unreviewed: { icon: "○", className: "status-unreviewed" },
+  approved: { icon: "✓", className: "status-approved" },
+  rejected: { icon: "×", className: "status-rejected" },
 };
 
 export default function FactReviewWorkspace() {
-  const [facts, setFacts] = useState(initialDemoFacts);
+  const [facts, setFacts] = useState(northstarDemoProject.facts);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
   const [announcement, setAnnouncement] = useState("");
 
-  const counts = facts.reduce<Record<ReviewStatus, number>>(
-    (result, fact) => ({ ...result, [fact.status]: result[fact.status] + 1 }),
-    { Unreviewed: 0, Approved: 0, Rejected: 0 },
-  );
-  const approvedCount = counts.Approved;
+  const counts = deriveReviewStatusCounts(facts);
+  const approvedCount = getApprovedDemoFacts(facts).length;
 
-  function setStatus(fact: DemoFact, status: ReviewStatus) {
+  function setStatus(fact: ProjectFact, status: ReviewStatus) {
     setFacts((current) => current.map((item) => item.id === fact.id ? { ...item, status } : item));
-    setAnnouncement(`${fact.category} marked ${status.toLowerCase()} in this demo. This change is temporary.`);
+    setAnnouncement(`${fact.category} marked ${statusLabels[status].toLowerCase()} in this demo. This change is temporary.`);
   }
 
-  function beginEdit(fact: DemoFact) {
+  function beginEdit(fact: ProjectFact) {
     setEditingId(fact.id);
     setDraft(fact.claim);
     setError("");
@@ -43,16 +41,14 @@ export default function FactReviewWorkspace() {
     setAnnouncement("Correction canceled. The displayed claim is unchanged.");
   }
 
-  function saveCorrection(event: FormEvent<HTMLFormElement>, fact: DemoFact) {
+  function saveCorrection(event: FormEvent<HTMLFormElement>, fact: ProjectFact) {
     event.preventDefault();
     const correctedClaim = draft.trim();
     if (!correctedClaim) {
       setError("Enter a claim before saving the correction.");
       return;
     }
-    setFacts((current) => current.map((item) => item.id === fact.id
-      ? { ...item, claim: correctedClaim, revisions: [...item.revisions, item.claim], status: "Unreviewed" }
-      : item));
+    setFacts((current) => current.map((item) => item.id === fact.id ? correctDemoFact(item, correctedClaim) : item));
     setEditingId(null);
     setDraft("");
     setError("");
@@ -68,7 +64,7 @@ export default function FactReviewWorkspace() {
         <ul className="review-counts">
           {statuses.map((status) => {
             const detail = statusDetails[status];
-            return <li className={detail.className} key={status}><span aria-hidden="true">{detail.icon}</span> {counts[status]} {status.toLowerCase()}</li>;
+            return <li className={detail.className} key={status}><span aria-hidden="true">{detail.icon}</span> {counts[status]} {statusLabels[status].toLowerCase()}</li>;
           })}
         </ul>
       </section>
@@ -106,18 +102,18 @@ export default function FactReviewWorkspace() {
                     <details>
                       <summary>Demo source details</summary>
                       <dl>
-                        <div><dt>Reference</dt><dd>Demo source — no website scanned</dd></div>
-                        <div><dt>Page or section</dt><dd>Placeholder — no page inspected</dd></div>
-                        <div><dt>Excerpt</dt><dd>None — no evidence collected</dd></div>
+                        <div><dt>Reference</dt><dd>{fact.source.reference}</dd></div>
+                        <div><dt>Page or section</dt><dd>{fact.source.pageOrSection}</dd></div>
+                        <div><dt>Excerpt</dt><dd>{fact.source.excerpt ?? "None — no evidence collected"}</dd></div>
                       </dl>
                     </details>
                     <p className="review-source-placeholder">No extracted evidence is associated with this illustrative claim.</p>
                   </div>
                   <div className="review-status">
                     <p className="review-field-label">Review status</p>
-                    <span className={`review-status-label ${detail.className}`}><span aria-hidden="true">{detail.icon}</span> {fact.status}</span>
+                    <span className={`review-status-label ${detail.className}`}><span aria-hidden="true">{detail.icon}</span> {statusLabels[fact.status]}</span>
                     {!isEditing && <div className="review-actions">
-                      {fact.status === "Unreviewed" && <><button className="review-action review-action-primary" type="button" onClick={() => setStatus(fact, "Approved")}>Approve</button><button className="review-action review-action-reject" type="button" onClick={() => setStatus(fact, "Rejected")}>Reject</button></>}
+                      {fact.status === "unreviewed" && <><button className="review-action review-action-primary" type="button" onClick={() => setStatus(fact, "approved")}>Approve</button><button className="review-action review-action-reject" type="button" onClick={() => setStatus(fact, "rejected")}>Reject</button></>}
                       <button className="review-action" type="button" onClick={() => beginEdit(fact)}>Correct claim</button>
                     </div>}
                   </div>
