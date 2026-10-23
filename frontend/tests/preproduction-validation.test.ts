@@ -90,6 +90,31 @@ test("fact totals and eligibility use current review state and shared transition
   assert.ok(findById(result.findings, "facts.unreviewed.product"));
 });
 
+test("approving all demo facts updates readiness without clearing brief or storyboard blockers", () => {
+  const facts = makeFacts();
+  facts[0] = decideDemoFact(facts[0], "approved");
+  facts[2] = correctDemoFact(facts[2], "A revised illustrative message");
+  facts[2] = decideDemoFact(facts[2], "approved");
+  const scenes = cloneInitialStoryboard();
+  scenes[0] = { ...scenes[0], onScreenText: facts[0].claim };
+  scenes[1] = { ...scenes[1], narration: facts[2].claim, durationSeconds: 2.5 };
+
+  const result = validateNorthstarPreproduction(facts, makeBrief({ requirementsConfirmed: false }), scenes);
+
+  assert.equal(result.factSummary.approved, 3);
+  assert.equal(result.factSummary.unreviewed, 0);
+  assert.equal(result.factSummary.rejected, 0);
+  assert.deepEqual(result.factSummary.eligibleFacts.map((fact) => fact.id), ["product", "audience", "message"]);
+  assert.equal(findById(result.findings, "facts.unreviewed.product"), undefined);
+  assert.equal(findById(result.findings, "facts.rejected.message"), undefined);
+  assert.equal(findById(result.findings, `grounding.exact-match.${scenes[0].id}.product`)?.severity, "info");
+  assert.ok(findById(result.findings, "brief.confirmation.required"));
+  assert.ok(findById(result.findings, `storyboard.duration-invalid.${scenes[1].id}`));
+  assert.equal(result.storyboardSummary.plannedRuntimeSeconds, null);
+  assert.equal(result.storyboardSummary.runtimeUnavailableReason, "invalid-scene-duration");
+  assert.equal(result.status, "needs-attention");
+});
+
 test("no approved facts produces an actionable warning without approved eligibility", () => {
   const facts = makeFacts().map((fact) => ({ ...fact, status: "rejected" as const }));
   const result = validateNorthstarPreproduction(facts, makeBrief(), cloneInitialStoryboard());
