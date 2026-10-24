@@ -1,6 +1,6 @@
 # Spotloom Studio frontend/backend integration contract
 
-**Status: partially implemented contract.** The local FastAPI app exposes `GET /health` and `POST /validate/preproduction`. Creative Readiness can explicitly submit its current in-memory Northstar snapshot to the validation route through a narrowly scoped same-origin Next.js rewrite. Website scanning, review, persistence, generation, rendering, and other business API boundaries remain proposals or unavailable as stated below.
+**Status: partially implemented contract.** The local FastAPI app exposes `GET /health`, `POST /validate/preproduction`, and `POST /validate/production-package`. Creative Readiness can explicitly submit its current in-memory Northstar snapshot to the pre-production validation route through a narrowly scoped same-origin Next.js rewrite. The production-package route performs structural validation only. Website scanning, review, persistence, generation, rendering, and other business API boundaries remain unavailable or proposed as stated below; `/scan` is not registered.
 
 ## 1. Purpose and non-goals
 
@@ -12,7 +12,7 @@ The validation route accepts a frontend-generated UUID correlation ID plus calle
 
 The frontend is a Next.js App Router application. The Northstar route layout wraps its nested pages in `NorthstarDemoProjectProvider` (`frontend/src/app/projects/sample-northstar/layout.tsx`). The provider holds facts, brief, and storyboard scenes in React state (`frontend/src/app/projects/sample-northstar/demo-project-provider.tsx`). This state is shared during client navigation within those routes and resets when the page is refreshed. Creative Readiness alone can explicitly submit a snapshot for backend evaluation; other workflows, including the production package preview, remain local.
 
-The Python package is a local Python 3.11 package with CLI entry points and a minimal FastAPI application (`backend/pyproject.toml`, `backend/adforge_renderer/api.py`). The app exposes `GET /health` and the structural `POST /validate/preproduction`; it does not expose CLI workflows over HTTP. The health response confirms only that the HTTP app is responding.
+The Python package is a local Python 3.11 package with CLI entry points and a minimal FastAPI application (`backend/pyproject.toml`, `backend/adforge_renderer/api.py`). The app exposes `GET /health`, `POST /validate/preproduction`, and the structural `POST /validate/production-package`; it does not expose CLI workflows over HTTP. The health response confirms only that the HTTP app is responding.
 
 Verified local workflows:
 
@@ -41,7 +41,7 @@ The current client eligibility calculation is `getApprovedDemoFacts`, which sele
 
 ## 4. Existing backend interfaces
 
-The existing HTTP interfaces are `GET /health` and `POST /validate/preproduction` (`backend/adforge_renderer/api.py`); the latter accepts only caller-supplied structural validation inputs, as specified in §5A. The following other interfaces are confirmed local JSON/CLI interfaces only.
+The existing HTTP interfaces are `GET /health`, `POST /validate/preproduction`, and `POST /validate/production-package` (`backend/adforge_renderer/api.py`). The pre-production route accepts caller-supplied validation inputs as specified in §5A; the production-package route performs the separate structural preflight specified in §5C. Neither route invokes CLI workflows. Website scanning remains CLI-only and `/scan` is not registered. The following other interfaces are confirmed local JSON/CLI interfaces only.
 
 ### Website scan
 
@@ -67,7 +67,7 @@ The CLIs report errors on stderr and through process exit codes. The validation 
 
 ### Typed integration schemas and validation API
 
-`backend/adforge_renderer/integration_schemas.py` defines strict Pydantic schemas and pure validation helpers. `POST /validate/preproduction` uses those schemas and `validate_contract_input`; it does not add persistence, generation, or rendering. `/scan` and all other business endpoints remain absent. The helper accepts supplied Python/JSON-shaped data and returns a deterministic validity flag, sanitized field paths/codes, and a derived runtime when all scene data is valid. It performs no network, filesystem, subprocess, generation, or rendering operations.
+`backend/adforge_renderer/integration_schemas.py` defines strict Pydantic schemas and pure validation helpers. `POST /validate/preproduction` uses those schemas and `validate_contract_input`; it does not add persistence, generation, or rendering. `/scan`, generation, and rendering endpoints remain absent; the separate production-package route is described in §5C. The helper accepts supplied Python/JSON-shaped data and returns a deterministic validity flag, sanitized field paths/codes, and a derived runtime when all scene data is valid. It performs no network, filesystem, subprocess, generation, or rendering operations.
 
 The implemented schemas are intentionally frontend-shaped:
 
@@ -97,7 +97,7 @@ Automated frontend evidence is limited to TypeScript assignability and execution
 
 ### 5A. Implemented pre-production validation endpoint (Phase 6E.1)
 
-`POST /validate/preproduction` is the only business-data HTTP endpoint. It is read-only, deterministic, and evaluates each request independently. The server is still bound to `127.0.0.1` by default. Every request requires a canonical lowercase UUID string in `correlationId`; the frontend creates a fresh value for every attempt, including retries. A valid request's successful response echoes that value. The identifier associates a response with one attempt only; it is not authentication, authorization, integrity attestation, factual verification, or proof that findings are correct. The endpoint accepts only the following top-level keys; each nested object is checked by the existing `BusinessClaims`, `CreativeBrief`, and `StoryboardInput` schemas through `validate_contract_input`:
+`POST /validate/preproduction` is the pre-production evaluation endpoint. It is read-only, deterministic, and evaluates each request independently. The server is still bound to `127.0.0.1` by default. Every request requires a canonical lowercase UUID string in `correlationId`; the frontend creates a fresh value for every attempt, including retries. A valid request's successful response echoes that value. The identifier associates a response with one attempt only; it is not authentication, authorization, integrity attestation, factual verification, or proof that findings are correct. The endpoint accepts only the following top-level keys; each nested object is checked by the existing `BusinessClaims`, `CreativeBrief`, and `StoryboardInput` schemas through `validate_contract_input`:
 
 ```json
 {
@@ -211,6 +211,14 @@ Malformed JSON, missing or malformed correlation IDs, missing top-level fields, 
 `PreproductionFinding` fields are `id`, `severity` (`blocker`, `warning`, `info`), `category` (`brief`, `facts`, `storyboard`, `runtime`, `grounding`, `production`), `title`, `explanation`, `resolution`, `destinationRoutes`, `blocksReadiness`, and nullable affected IDs. The summary's blocker count is derived from `blocksReadiness`; warning and info counts are derived from severity. Finding IDs are deduplicated and ordered by severity, category, affected entity ID, and ID. `readinessStatus` is `needs-attention` if any blocker exists, otherwise `ready-for-human-review`; that status never means production readiness. `evaluationStatus` is always `evaluated-with-limitations` for valid requests. The brief confirmation signal is reported separately as `caller-declared-confirmed` or `not-confirmed`. `factualVerification` is always `not-performed`.
 
 A 200 response means the request matches the structural contract and the supported deterministic rules were evaluated. It does not mean the brief is factually correct, caller-marked approvals are independently reviewed or verified, claims are semantically grounded, or an ad is ready. No client-supplied runtime, readiness, finding, or count is accepted. The endpoint does not cross-check `reliedUponFactIds` against facts or compare scene IDs against a client-supplied fact relationship because no such relationship exists in the models. It associates only exact normalized copy matches in on-screen text and narration, as the frontend does. The validation logic performs no outbound HTTP, filesystem, subprocess, persistence, scanning, generation, rendering, or export operation; the frontend integration is limited to the Creative Readiness action described above.
+
+### 5C. Structural production-package preflight endpoint (Phase 6H.4.2)
+
+`POST /validate/production-package` is separate from `/validate/preproduction`, which retains its existing request and response contract. The route reads the raw ASGI request stream in chunks, rejects a declared body larger than 65,536 bytes before reading, and independently enforces the same limit on received bytes. It passes the bounded raw bytes to `validate_production_package_json`; it does not call the decoded-object entry point. A deployment must also configure an upstream/server request-body limit: application streaming cannot prevent the server or proxy from allocating an oversized individual chunk before delivering it.
+
+The route requires `application/json` with no charset or UTF-8 charset. Missing/unsupported media types return 415; malformed/conflicting `Content-Length` and incomplete/mismatched framing return 400; oversized bodies return 413; malformed JSON, duplicate keys, invalid UTF-8, non-finite constants, and parser failures return 400. Package schema errors and unsupported contract/profile identifiers return 422. A package that matches the supported schema/profile is evaluated with HTTP 200 and reports `structurallyValid` plus deterministic ordered issues, including when structural rules fail. Responses contain no submitted package or raw parser details. Unexpected route errors return a fixed 500 response with a safe `errorId`; logs contain only the exception class and that ID.
+
+`correlationId` is returned only when independently validated as a canonical lowercase UUID. It is available on supported evaluations and schema-invalid responses when the top-level value itself is valid; otherwise it is `null`. It associates a response with a request only and is not authentication, authorization, or an integrity proof. Caller-declared approval and claim classification remain untrusted. A successful structural response does not establish renderer compatibility, rendering success, asset availability, media validity, factual accuracy, source verification, or legal/policy readiness. This route performs no filesystem, network, subprocess, asset-store, renderer, or persistence operations, and does not perform operational/environment checks. Client disconnects abandon body processing and do not produce an evaluation.
 
 #### Frontend rule mapping and parity limits (Phase 6E.2)
 
@@ -360,7 +368,7 @@ The frontend will need explicit idle/loading/success/partial/blocked/error state
 
 ## 13. Open questions and assumptions
 
-1. What deployment boundary will host the future business API? The current FastAPI application is only a local health-check foundation.
+1. What deployment boundary will host future authenticated project and asset workflows? The current FastAPI application provides local health and validation routes, but no authenticated project, asset, generation, or rendering service.
 2. Who can create, view, edit, approve, generate, render, and retrieve a project? What authentication and tenant/ownership model applies?
 3. What persistence, retention, export, and deletion guarantees are required for business facts, source excerpts, briefs, and artifacts?
 4. Should frontend `ProjectFact` map to backend `BusinessFact` directly, or should a versioned API DTO preserve frontend labels and backend provenance separately? How are current text revision arrays mapped to `supersedes_fact_id` lineage?

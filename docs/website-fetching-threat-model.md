@@ -5,7 +5,7 @@
 
 ## 1. Executive summary
 
-The repository contains a local CLI scanner and a FastAPI liveness endpoint. The API exposes only `GET /health`; `POST /scan` does not exist. The scanner has useful URL checks, redirect checks, robots handling, response-size limits, and timeouts, but these do not establish a safe network boundary for an internet-facing service. In particular, it resolves and checks a hostname before asking HTTPX to connect by hostname; HTTPX then resolves again. A changed answer can therefore bypass the checked address (DNS rebinding/TOCTOU). There is no configured deployment egress isolation, service-level concurrency cap, or separate CPU/memory limit for synchronous HTML parsing.
+The repository contains a local CLI scanner and a FastAPI application with `GET /health`, `POST /validate/preproduction`, and `POST /validate/production-package`. The validation routes do not expose website fetching; `POST /scan` is not registered. The scanner has useful URL checks, redirect checks, robots handling, response-size limits, and timeouts, but these do not establish a safe network boundary for an internet-facing service. In particular, it resolves and checks a hostname before asking HTTPX to connect by hostname; HTTPX then resolves again. A changed answer can therefore bypass the checked address (DNS rebinding/TOCTOU). There is no configured deployment egress isolation, service-level concurrency cap, or separate CPU/memory limit for synchronous HTML parsing.
 
 Keep scanning CLI-only for local development. For a controlled demonstration, enable scanning only if the environment can enforce outbound network policy and isolate the fetcher from application data. For public or multi-user use, prefer an egress-restricted worker with destination enforcement at connection time, resource isolation, authentication/authorization, and operational controls. A separate fetch service can provide a stronger boundary where network policy is centrally enforceable, but is more operationally complex. Direct application-process fetching is not recommended for public exposure.
 
@@ -17,7 +17,7 @@ This section describes inspected code, not guarantees inferred from planning doc
 
 ### API and invocation boundary
 
-- `backend/adforge_renderer/api.py`: `app` disables docs and OpenAPI routes and defines only `GET /health`, returning `{"status":"ok"}`. The CLI `main` defaults Uvicorn to `127.0.0.1:8000`; `_loopback_host` accepts `localhost` or a loopback IP only. This is a local launch guard, not a deployment firewall or authentication boundary. The app can be embedded by another process, so deployment exposure must be controlled separately.
+- `backend/adforge_renderer/api.py`: `app` disables docs and OpenAPI routes and defines `GET /health`, `POST /validate/preproduction`, and `POST /validate/production-package`; there is no `/scan` route. The CLI `main` defaults Uvicorn to `127.0.0.1:8000`; `_loopback_host` accepts `localhost` or a loopback IP only. This is a local launch guard, not a deployment firewall or authentication boundary. The app can be embedded by another process, so deployment exposure must be controlled separately.
 - `backend/tests/test_api.py`: tests the liveness response, confirms it does not invoke network/subprocess services or return a test secret/path/traceback, confirms imports do not launch work, tests loopback startup validation, and asserts `/scan` GET and POST return 404. These tests establish behavior of the in-process app under test; they do not prove production routing or firewall policy.
 - `backend/adforge_renderer/scan_cli.py`: `main` accepts a positional URL and required caller-selected `--output` path, runs `scan_website`, and writes serialized `ScanResult`. It is a local command, not an HTTP interface. The caller controls filesystem permissions and output path. It prints the chosen output path. No scan was run against an external site for this review.
 - Dependencies in `backend/pyproject.toml` are pinned: Python `>=3.11,<3.12`, HTTPX `0.28.1`, BeautifulSoup `4.13.3`, FastAPI `0.115.12`, Uvicorn `0.34.0`, Pydantic `2.10.6`. Dependency pins aid reproducibility, not runtime isolation.
@@ -87,7 +87,7 @@ These are candidate designs, not implemented components. A container alone is no
 
 ### Phase 0: current local development
 
-Keep `adforge-scan` as an explicitly local CLI for trusted developer use and mocked tests. Keep API behavior at `/health` only. Do not run scans against internal destinations or use real external targets for security tests. Local developer consent to invoke the CLI is not an isolation boundary; output files and logs remain the developer's responsibility.
+Keep `adforge-scan` as an explicitly local CLI for trusted developer use and mocked tests. The API currently exposes `/health`, `/validate/preproduction`, and `/validate/production-package`; keep website scanning unavailable because `/scan` is not registered. Do not run scans against internal destinations or use real external targets for security tests. Local developer consent to invoke the CLI is not an isolation boundary; output files and logs remain the developer's responsibility.
 
 ### Phase 1: controlled demonstration
 

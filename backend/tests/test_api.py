@@ -110,7 +110,7 @@ def test_startup_rejects_unsafe_or_invalid_configuration(arguments: list[str]) -
     assert error.value.code == 2
 
 
-def test_only_health_and_preproduction_validation_routes_are_exposed() -> None:
+def test_only_health_and_validation_routes_are_exposed() -> None:
     with TestClient(api.app) as client:
         assert client.get("/").status_code == 404
         assert client.get("/docs").status_code == 404
@@ -128,6 +128,7 @@ def test_only_health_and_preproduction_validation_routes_are_exposed() -> None:
     assert routes == {
         ("/health", "GET"),
         ("/validate/preproduction", "POST"),
+        ("/validate/production-package", "POST"),
     }
 
 

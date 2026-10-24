@@ -84,7 +84,7 @@ Run the API and existing backend tests with:
 python -m pytest .\backend\tests -v
 ```
 
-This foundation exposes only `/health`. No business endpoints, frontend integration, persistence, generation, or rendering over HTTP are implemented.
+The local API exposes `GET /health`, `POST /validate/preproduction`, and the separate schema-only `POST /validate/production-package` route. The production-package route accepts a bounded JSON body and reports structural validation only; it does not integrate with the renderer, assets, generation, persistence, or the frontend. These validation routes do not create or render ads.
 
 Website scanning remains CLI-only. There is intentionally no `/scan` route: although the scanner validates resolved addresses and each redirect, HTTPX resolves the hostname again when connecting, leaving a DNS-rebinding/time-of-check-to-time-of-use gap. No deployment egress isolation or request-concurrency limit is configured. The scanner also echoes `original_url` in `ScanResult`, so a rejected URL containing credentials would be reflected in serialized output; a future HTTP adapter must redact it. See [`WEBSITE_EXTRACTION.md`](WEBSITE_EXTRACTION.md) for the security boundary and limitations. Do not expose the scanner as a network service until destination pinning or enforceable egress isolation, resource limits, and safe response handling are established.
 
