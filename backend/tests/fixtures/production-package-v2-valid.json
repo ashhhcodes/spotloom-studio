@@ -1,0 +1,135 @@
+{
+  "contractVersion": "spotloom.production-package.v2",
+  "correlationId": "a714886a-bd4c-4dde-9f88-8e29c5d764b1",
+  "rendererProfileId": "spotloom.storyboard.vertical-1080x1920-h264-aac-15s.v1",
+  "brief": {
+    "objective": "awareness",
+    "targetAudience": {
+      "kind": "creative",
+      "text": "People looking for a considered everyday cup"
+    },
+    "productOrOffer": {
+      "kind": "creative",
+      "text": "Small-batch roasted coffee"
+    },
+    "keyMessage": {
+      "kind": "creative",
+      "text": "A good cup, made simple."
+    },
+    "valueProposition": null,
+    "platform": "instagram",
+    "aspectRatio": "9:16",
+    "duration": 15,
+    "tone": {
+      "kind": "creative",
+      "text": "Warm, considered, and clear"
+    },
+    "callToAction": {
+      "kind": "creative",
+      "text": "Learn more"
+    },
+    "reliedUponFactIds": [
+      "brand"
+    ],
+    "requirementsConfirmed": false
+  },
+  "facts": [
+    {
+      "id": "brand",
+      "category": "Business name",
+      "claim": "Northstar Coffee",
+      "originalClaim": "Northstar Coffee",
+      "revisions": [],
+      "status": "approved",
+      "source": {
+        "kind": "illustrative-placeholder",
+        "reference": "Demo source — no website scanned",
+        "pageOrSection": "Placeholder — no page inspected",
+        "excerpt": null
+      }
+    }
+  ],
+  "scenes": [
+    {
+      "id": "opening",
+      "order": 1,
+      "title": {
+        "kind": "creative",
+        "text": "Opening"
+      },
+      "narrativePurpose": {
+        "kind": "creative",
+        "text": "Introduce the illustrative brand"
+      },
+      "durationFrames": 180,
+      "transitionFromPrevious": "none",
+      "backgroundColor": "#151A20",
+      "elements": [
+        {
+          "type": "text",
+          "id": "brand-name",
+          "x": 1000,
+          "y": 1500,
+          "width": 8000,
+          "height": 1200,
+          "style": "heading",
+          "align": "center",
+          "content": {
+            "kind": "claim",
+            "text": "Northstar Coffee",
+            "factId": "brand"
+          }
+        }
+      ]
+    },
+    {
+      "id": "closing",
+      "order": 2,
+      "title": {
+        "kind": "creative",
+        "text": "Closing"
+      },
+      "narrativePurpose": {
+        "kind": "creative",
+        "text": "Close the illustrative sequence"
+      },
+      "durationFrames": 180,
+      "transitionFromPrevious": "cut",
+      "backgroundColor": "#F2EEE7",
+      "elements": [
+        {
+          "type": "shape",
+          "id": "accent-circle",
+          "x": 7000,
+          "y": 1000,
+          "width": 2000,
+          "height": 2000,
+          "shape": "circle",
+          "color": "#D98B45"
+        }
+      ]
+    }
+  ],
+  "assets": [
+    {
+      "id": "ast_demo_audio_01",
+      "kind": "audio",
+      "format": "wav-pcm-s16le-48000-stereo",
+      "declaredDurationFrames": 360,
+      "assetVersionId": "ver_demo_audio_0001"
+    }
+  ],
+  "audioSegments": [
+    {
+      "id": "music-bed",
+      "kind": "music",
+      "assetId": "ast_demo_audio_01",
+      "sceneId": null,
+      "startFrame": 0,
+      "endFrame": 360,
+      "sourceStartFrame": 0,
+      "transcript": null
+    }
+  ],
+  "projectId": "sample-northstar"
+}

@@ -1,0 +1,52 @@
+{
+  "contractVersion": "spotloom.production-package.v1",
+  "correlationId": "a714886a-bd4c-4dde-9f88-8e29c5d764b1",
+  "rendererProfileId": "spotloom.storyboard.vertical-1080x1920-h264-aac-15s.v1",
+  "brief": {
+    "objective": "awareness",
+    "targetAudience": {"kind": "creative", "text": "People looking for a considered everyday cup"},
+    "productOrOffer": {"kind": "creative", "text": "Small-batch roasted coffee"},
+    "keyMessage": {"kind": "creative", "text": "A good cup, made simple."},
+    "valueProposition": null,
+    "platform": "instagram",
+    "aspectRatio": "9:16",
+    "duration": 30,
+    "tone": {"kind": "creative", "text": "Warm, considered, and clear"},
+    "callToAction": {"kind": "creative", "text": "Learn more"},
+    "reliedUponFactIds": [],
+    "requirementsConfirmed": false
+  },
+  "facts": [],
+  "scenes": [
+    {
+      "id": "only-scene",
+      "order": 1,
+      "title": {"kind": "creative", "text": "Only scene"},
+      "narrativePurpose": {"kind": "creative", "text": "Invalid duration sample"},
+      "durationFrames": 359,
+      "transitionFromPrevious": "none",
+      "backgroundColor": "#151A20",
+      "elements": []
+    }
+  ],
+  "assets": [
+    {
+      "id": "ast_demo_audio_01",
+      "kind": "audio",
+      "format": "wav-pcm-s16le-48000-stereo",
+      "declaredDurationFrames": 360
+    }
+  ],
+  "audioSegments": [
+    {
+      "id": "music-bed",
+      "kind": "music",
+      "assetId": "ast_demo_audio_01",
+      "sceneId": null,
+      "startFrame": 0,
+      "endFrame": 360,
+      "sourceStartFrame": 0,
+      "transcript": null
+    }
+  ]
+}
