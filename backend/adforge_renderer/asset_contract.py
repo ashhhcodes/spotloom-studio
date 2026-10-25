@@ -107,7 +107,9 @@ class PrivateObjectVersionReference(_StrictModel):
 
     @field_validator("value")
     @classmethod
-    def reject_control_characters(cls, value: str) -> str:
+    def require_nonblank_reference(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("object version reference must not be blank")
         if any(ord(character) < 32 or ord(character) == 127 for character in value):
             raise ValueError("object version reference contains unsupported characters")
         return value
