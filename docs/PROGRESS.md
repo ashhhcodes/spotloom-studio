@@ -1,24 +1,26 @@
 # Project Progress / LLM Handoff
 
-- Current milestone: Planning / specification review
-- Current status: No application code implemented yet
-- Last updated: 2026-10-22
+- Current milestone: Milestone 2, Phase 1 — trusted asset policy and architecture planning
+- Current status: Spotloom Studio frontend and local backend foundations exist. Production package validation, pure v1/v2 render-plan compilers, caller-supplied asset contracts/matcher, and a pure in-memory WAV v1 validator are implemented. Trusted storage, ingestion APIs, authentication/authorization, trusted evidence issuance, persistent lifecycle/readiness, leases, and renderer asset resolution are not implemented.
+- Security boundary: the existing local `website_scan.py` / `scan_cli.py` implementation is distinct from the API; `/scan` is not registered and must remain unavailable. The scanner has a documented DNS rebinding/TOCTOU limitation and public-deployment warning. This asset-architecture work adds no URL fetching. No storage provider, identity model, or production limits are selected by the policy record.
+- Last updated: 2026-10-25
+
+The milestone entries below are a historical implementation log. Their original dates, environment observations, and test results describe those earlier runs and are not current verification results.
 
 ## Completed
 - [x] Initial product and architecture documentation drafted.
 - [x] Frontend-tool strategy recorded: Codex primary, Grok optional reviewer.
 
 ## Current task
-Review and approve `PRD.md`, `ARCHITECTURE.md`, `API_CONTRACTS.md`, and `DESIGN_SYSTEM.md` before implementation.
+Review the proposed trusted-asset architecture and resolve the policy decisions marked `OPEN — APPROVAL REQUIRED` in `docs/asset-trust-policy-decisions.md` before implementation depends on them.
 
 ## Next steps
-1. Resolve open questions in `DECISIONS.md`.
-2. Create the application repository and copy docs into its `docs/` directory.
-3. Initialize frontend/backend skeletons and test/tooling.
-4. Build a render-only vertical slice by Day 4 at the latest.
+1. Review and approve the trusted-asset architecture proposal in `docs/trusted-asset-architecture-proposal.md`.
+2. Resolve deployment-specific identity, storage, evidence, limits, retention, and lease decisions without treating proposals or development defaults as production policy.
+3. Plan an implementation milestone only after its required approvals; keep `/scan` unavailable.
 
 ## Important
-Do not claim the app is implemented. Do not claim tests passed. Update this file after each meaningful milestone with commit SHA, files changed, tests run, exact outcomes, and unresolved issues.
+Record exact commands and outcomes for each verification run. Do not treat historical test results below as current results.
 
 ## Milestone 1 update — Renderer proof
 - Date: 2026-10-22
