@@ -28,6 +28,7 @@ def test_canonical_wav_returns_observed_metadata_only() -> None:
     assert result.issues == ()
     assert result.metadata is not None
     assert result.metadata.byte_size == len(payload)
+    assert result.metadata.sha256 == "6776df7cbc5043d5865b786cf5b32616fb21b22f0d3b3e2e6b4d3c1b85768356"
     assert result.metadata.properties.model_dump() == {
         "container": "wav",
         "codec": "pcm_s16le",
@@ -37,6 +38,28 @@ def test_canonical_wav_returns_observed_metadata_only() -> None:
         "sample_count": SAMPLES_PER_VIDEO_FRAME,
         "duration_frames": 1,
     }
+
+
+def test_distinct_valid_input_bytes_produce_distinct_observation_digests() -> None:
+    original = canonical_pcm_wav()
+    changed = original[:-1] + b"\x01"
+
+    original_result = validate_wav_bytes(original)
+    changed_result = validate_wav_bytes(changed)
+
+    assert original_result.valid and original_result.metadata is not None
+    assert changed_result.valid and changed_result.metadata is not None
+    assert original_result.metadata.byte_size == len(original)
+    assert changed_result.metadata.byte_size == len(changed)
+    assert original_result.metadata.sha256 != changed_result.metadata.sha256
+
+
+def test_invalid_input_returns_no_observation_metadata() -> None:
+    result = validate_wav_bytes(b"not a WAV file")
+
+    assert not result.valid
+    assert result.metadata is None
+    assert result.issues[0].code == "wav_container_invalid"
 
 
 @pytest.mark.parametrize(

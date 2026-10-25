@@ -7,6 +7,7 @@ trusted storage, authorization, authenticity, or production readiness.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import struct
 
 from pydantic import ValidationError
@@ -33,7 +34,10 @@ class WavValidationIssue:
 
 @dataclass(frozen=True)
 class ObservedWavMetadata:
+    """Local observations measured from the exact in-memory input bytes."""
+
     byte_size: int
+    sha256: str
     properties: ObservedWavProperties
 
 
@@ -159,4 +163,10 @@ def validate_wav_bytes(
         )
     except ValidationError:
         return _failure("wav_metadata_out_of_bounds", "Observed WAV metadata exceeds the supported bounds.")
-    return WavValidationResult(ObservedWavMetadata(len(data), properties))
+    return WavValidationResult(
+        ObservedWavMetadata(
+            byte_size=len(data),
+            sha256=hashlib.sha256(data).hexdigest(),
+            properties=properties,
+        )
+    )
