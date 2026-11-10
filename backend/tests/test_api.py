@@ -110,7 +110,7 @@ def test_startup_rejects_unsafe_or_invalid_configuration(arguments: list[str]) -
     assert error.value.code == 2
 
 
-def test_only_health_and_validation_routes_are_exposed() -> None:
+def test_expected_routes_are_exposed_and_scan_remains_unavailable() -> None:
     with TestClient(api.app) as client:
         assert client.get("/").status_code == 404
         assert client.get("/docs").status_code == 404
@@ -127,8 +127,13 @@ def test_only_health_and_validation_routes_are_exposed() -> None:
     }
     assert routes == {
         ("/health", "GET"),
+        ("/auth/identity", "GET"),
+        ("/projects", "POST"),
+        ("/projects", "GET"),
+        ("/projects/{project_id}", "GET"),
         ("/validate/preproduction", "POST"),
         ("/validate/production-package", "POST"),
+        ("/render/demo", "POST"),
     }
 
 
@@ -158,6 +163,16 @@ def test_preproduction_validation_returns_schema_result_and_derived_runtime() ->
         "infoCount": sum(finding["severity"] == "info" for finding in findings),
     }
     assert "brief.confirmation.required" in {finding["id"] for finding in findings}
+
+
+def test_preproduction_accepts_supported_storyboard_snapshot() -> None:
+    payload = valid_request()
+    with TestClient(api.app) as client:
+        response = client.post("/validate/preproduction", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["requestSchemaValid"] is True
+    assert response.json()["storyboardSummary"]["sceneCount"] == len(payload["storyboard"]["scenes"])
 
 
 def test_runtime_is_recomputed_from_submitted_scene_durations() -> None:
@@ -387,6 +402,28 @@ def test_schema_issues_are_sanitized_and_change_with_input(payload_mutation, exp
     assert all(set(issue) == {"path", "code", "message"} for issue in body["issues"])
     assert all(issue["message"] == "Value does not match the supported contract." for issue in body["issues"])
     assert "correlationId" not in body
+
+
+def test_preproduction_still_rejects_unsupported_storyboard_scene_fields() -> None:
+    payload = valid_request()
+    for scene in payload["storyboard"]["scenes"]:
+        # Renderer-only controls remain outside the strict evaluation contract.
+        scene["role"] = "hook"
+        scene["transition"] = "cut"
+
+    with TestClient(api.app) as client:
+        response = client.post("/validate/preproduction", json=payload)
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["requestSchemaValid"] is False
+    assert body["evaluationStatus"] == "not-evaluated"
+    assert [issue["path"] for issue in body["issues"]] == [
+        path
+        for scene_index in range(len(payload["storyboard"]["scenes"]))
+        for path in (f"storyboard.scenes.{scene_index}.extra_field",) * 2
+    ]
+    assert all(issue["message"] == "Value does not match the supported contract." for issue in body["issues"])
 
 
 @pytest.mark.parametrize("duration", [None, 1.5, 0, -1, 61])
