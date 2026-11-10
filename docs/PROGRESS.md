@@ -1,9 +1,9 @@
 # Project Progress / LLM Handoff
 
-- Current milestone: Milestone 2, Phase 1 — trusted asset policy and architecture planning
-- Current status: Spotloom Studio frontend and local backend foundations exist. Production package validation, pure v1/v2 render-plan compilers, caller-supplied asset contracts/matcher, and a pure in-memory WAV v1 validator are implemented. Trusted storage, ingestion APIs, authentication/authorization, trusted evidence issuance, persistent lifecycle/readiness, leases, and renderer asset resolution are not implemented.
-- Security boundary: the existing local `website_scan.py` / `scan_cli.py` implementation is distinct from the API; `/scan` is not registered and must remain unavailable. The scanner has a documented DNS rebinding/TOCTOU limitation and public-deployment warning. This asset-architecture work adds no URL fetching. No storage provider, identity model, or production limits are selected by the policy record.
-- Last updated: 2026-10-25
+- Current milestone: Milestone 2, Phase 3 — authenticated frontend project workspace integration
+- Current status: Phase 2 backend implementation provides exact verified Clerk `(issuer, subject)` mapping to a backend-generated stable internal user UUID, idempotent mapping with database uniqueness protection and savepoint/re-read conflict handling, and authenticated project create/list/get endpoints. Project ownership is derived server-side; listing and retrieval are owner-scoped; unknown and non-owned valid project IDs return the same `404`; client-supplied ownership/identity fields are rejected. Project names are trimmed, nonblank, and bounded by the current **provisional engineering default** of 120 characters. Local PostgreSQL verification against the disposable `spotloom_test` database passed: migration upgrade/downgrade including cleanup and concurrent identity mapping (2 PostgreSQL tests passed); the full backend suite reported 573 passed and 1 warning. These results verify the local test database only. The frontend now lists, creates, and opens authenticated project records through the same-origin proxy; it does not persist project content. Hosted PostgreSQL and production deployment remain unresolved and unauthorized. Migrations must be executed through an explicit controlled setup/release command. This local implementation is not a production-readiness claim. Trusted storage/evidence, asset lifecycle/readiness, leases, and renderer asset resolution remain unimplemented.
+- Security boundary: `/auth/identity` retains its existing verified issuer/subject response contract. The existing local `website_scan.py` / `scan_cli.py` implementation is distinct from the API; `/scan` is not registered and remains unavailable (`GET` and `POST` return `404`). The scanner's documented DNS rebinding/TOCTOU limitation and public-deployment warning remain. No asset-pipeline URL fetching is added. Hosted database/provider selection and production deployment/configuration remain unresolved and unauthorized; migrations must run only as an explicit controlled setup/release operation.
+- Last updated: 2026-11-01
 
 The milestone entries below are a historical implementation log. Their original dates, environment observations, and test results describe those earlier runs and are not current verification results.
 
@@ -12,12 +12,12 @@ The milestone entries below are a historical implementation log. Their original 
 - [x] Frontend-tool strategy recorded: Codex primary, Grok optional reviewer.
 
 ## Current task
-Review the proposed trusted-asset architecture and resolve the policy decisions marked `OPEN — APPROVAL REQUIRED` in `docs/asset-trust-policy-decisions.md` before implementation depends on them.
+The first authenticated project workspace integration is complete: signed-in users can list, create, and open their owner-scoped project records. It persists project records only; it does not persist the Northstar illustrative sample, briefs, facts, storyboards, or render jobs. The 120-character project-name bound remains a provisional engineering default, not a finalized product decision. Hosted provider selection and production deployment remain unresolved and unauthorized.
 
 ## Next steps
-1. Review and approve the trusted-asset architecture proposal in `docs/trusted-asset-architecture-proposal.md`.
-2. Resolve deployment-specific identity, storage, evidence, limits, retention, and lease decisions without treating proposals or development defaults as production policy.
-3. Plan an implementation milestone only after its required approvals; keep `/scan` unavailable.
+1. Design and separately authorize persistence for project content (briefs, facts, storyboard, and render state) before connecting those demo workflows to saved projects.
+2. Consider pagination as a scalability improvement if project volume requires it; it is not currently a Phase 2 blocker.
+3. Keep hosted-provider and production-deployment decisions open and unauthorized; keep `/scan` unavailable.
 
 ## Important
 Record exact commands and outcomes for each verification run. Do not treat historical test results below as current results.

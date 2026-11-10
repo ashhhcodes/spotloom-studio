@@ -2,10 +2,13 @@
 
 **Status: proposal for review; not implementation authorization.** This document
 distinguishes current pure code from proposed trust boundaries. It does not
-select a storage or identity provider, tenant model, production limit, retention
-period, or deployment topology. Items marked **OPEN — APPROVAL REQUIRED** remain
-gates. The repository has an existing local website-extraction implementation
-in `backend/adforge_renderer/website_scan.py` and `scan_cli.py`; the API route
+select a storage provider, production limit, retention period, or deployment
+topology. Individual-user, owner-only v1 tenancy, Clerk selection, and the
+canonical internal user ID direction are approved policy only; exact token
+validation and implementation details remain open. Items marked
+**OPEN — APPROVAL REQUIRED** remain gates. The repository has an existing
+local website-extraction implementation in
+`backend/adforge_renderer/website_scan.py` and `scan_cli.py`; the API route
 `/scan` is not registered and remains unavailable. This proposal adds no URL
 fetching or scanner capability. The existing CLI has a documented DNS
 rebinding/TOCTOU gap and is not safe to expose publicly; see
@@ -58,9 +61,10 @@ sharing disabled, consistent with the existing approved direction.
 The trusted repository/service—not the HTTP payload—must assign canonical
 identity and enforce uniqueness. A caller-provided owner or tenant field is
 metadata until the approved identity model says otherwise. Authentication
-provider, tenant/project ownership model, and principal-to-project mapping are
-**OPEN — APPROVAL REQUIRED**. No current API authentication or tenant isolation
-is implied.
+direction and Clerk selection are approved; exact token verification,
+persistent principal mapping, administrative ownership-transfer safeguards,
+and deployment configuration remain **OPEN — APPROVAL REQUIRED**. No current
+API authentication or tenant isolation is implied.
 
 ### Storage and immutable versions
 
@@ -72,8 +76,10 @@ raw storage keys as authorization tokens or treat IDs as secrets.
 
 The metadata repository should bind `(projectId, assetId, assetVersionId)` to
 one exact private object-version reference and record lifecycle revision. It
-must reject an identity rebind. Storage provider, object-version semantics,
-conditional-write support, encryption/KMS, and deletion guarantees are
+must reject an identity rebind. Private storage, stable immutable versions,
+exact-version reads, conditional writes, and controlled deletion/retention are
+approved requirements. Provider selection and deployment-specific proof of
+these capabilities, plus encryption/KMS configuration, remain
 **OPEN — APPROVAL REQUIRED**.
 
 ### Digest and validation evidence
@@ -100,8 +106,9 @@ evidence, and evidence schema versioning are **OPEN — APPROVAL REQUIRED**.
 Evidence becomes unusable if identity, exact object version, digest/size,
 profile, or required validation policy no longer matches, if the validation
 attempt is stale, or if the evidence has been revoked. A changed byte stream is
-a new immutable asset version. Whether unchanged bytes may be revalidated under
-the same version or require a new version remains an open policy choice.
+a new immutable asset version. Revalidation may issue new evidence for the
+same immutable version only after exact-version verification. The concrete
+revalidation workflow and persistence remain open.
 
 ### Lifecycle and concurrency
 
@@ -132,8 +139,10 @@ state transitions.
 
 Deletion during a valid already-authorized render lease may permit that job to
 finish under the approved direction. Expiration behavior during an active job,
-retry rules, rejected-version revalidation, evidence revocation, lease expiry,
-renewal, recovery, and release mechanics remain **OPEN — APPROVAL REQUIRED**.
+retry rules, rejected-version revalidation, evidence revocation, and the
+duration and mechanics for lease expiry, renewal, recovery, and release remain
+**OPEN — APPROVAL REQUIRED**. The policy direction requires bounded leases and
+abandoned-job recovery.
 All durable transitions require compare-and-swap or equivalent transactions;
 the pure helper alone is not an atomicity guarantee.
 
@@ -150,9 +159,10 @@ enforce byte limits while streaming, then duration after trusted parsing;
 separate global, per-project, and per-principal quotas/concurrency; account for
 quarantined and retained versions explicitly. Keep audit records for security
 and lifecycle transitions with bounded, redacted fields. Never log media bytes,
-credentials, full untrusted filenames, or raw parser exceptions. Retention,
-quota dimensions/overage, failed-upload cleanup, backup deletion, audit
-retention, privacy jurisdiction, and production resource budgets are
+credentials, full untrusted filenames, or raw parser exceptions. Production
+quota size and product/plan considerations beyond approved reject-on-exceed
+behavior, failed-upload cleanup, backup deletion, audit retention, privacy
+jurisdiction, and production resource budgets are
 **OPEN — APPROVAL REQUIRED** and deployment-specific where infrastructure or
 legal controls are involved.
 
@@ -203,7 +213,10 @@ REQUIRED**.
 Before code depends on them, resolve the existing **OPEN — APPROVAL REQUIRED**
 items in `docs/asset-trust-policy-decisions.md`, especially:
 
-- Tenant/project ownership model, identity provider, and authorization claims.
+- Remaining OD-01/OD-02 details: administrator ownership-transfer safeguards,
+  persistent ownership mapping, exact token type/claims/verification, and
+  deployment authorization configuration. The owner-only v1 direction and
+  Clerk selection are approved, but no integration is implemented.
 - Storage provider and enforceable immutable-version, private-read, deletion,
   encryption and backup guarantees.
 - Trusted validator identity, evidence authenticity/version/revocation, and
@@ -217,8 +230,10 @@ items in `docs/asset-trust-policy-decisions.md`, especially:
 
 Recommended dependency order, pending approval:
 
-1. Approve identity, storage guarantees, evidence authority, WAV compatibility,
-   resource limits, retention and deletion/lease policies.
+1. Resolve the remaining identity/token contract, storage guarantees, evidence
+   authority, WAV compatibility, resource limits, retention and deletion/lease
+   policies without reopening approved policy directions absent an explicit
+   policy change.
 2. Finalize versioned durable metadata/evidence and CAS contracts without
    conflating caller declarations with trusted observations.
 3. Implement private immutable quarantine storage and bounded upload
