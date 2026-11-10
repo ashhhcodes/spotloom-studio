@@ -34,10 +34,62 @@
 .projects-detail-card dl > div { display: grid; grid-template-columns: minmax(7rem, 0.3fr) 1fr; gap: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--line); }
 .projects-detail-card dt { color: var(--muted); font-size: 0.78rem; }
 .projects-detail-card dd { margin: 0; color: var(--ink-soft); font-size: 0.8rem; overflow-wrap: anywhere; }
+.creative-workspace-stack { display: grid; gap: 1.2rem; margin-top: 1.2rem; }
+.creative-overview, .creative-editor-panel { border: 1px solid var(--line); background: var(--surface); padding: clamp(1.2rem, 3vw, 2rem); }
+.creative-overview-heading, .creative-editor-heading, .creative-save-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+.creative-overview h2, .creative-editor-panel h2 { margin: 0; font-family: var(--font-editorial); font-weight: 400; letter-spacing: -0.035em; font-size: clamp(1.55rem, 3vw, 2.2rem); }
+.creative-overview-heading > div > .workspace-label, .creative-editor-heading > div > .workspace-label { margin-bottom: 0.3rem; }
+.creative-revision { color: var(--muted); font-size: 0.74rem; white-space: nowrap; }
+.creative-campaign-status { display: flex; gap: 0.65rem; align-items: baseline; margin: 0.95rem 0 0; color: var(--ink-soft); font-size: 0.82rem; }
+.creative-campaign-status strong { color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.creative-next-action { display: flex; gap: 0.75rem; align-items: baseline; margin: 1.25rem 0; padding: 0.8rem 0; border-block: 1px solid var(--line); color: var(--ink-soft); font-size: 0.86rem; }
+.creative-next-action strong { color: var(--accent-strong); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em; }
+.creative-readiness-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem 1.4rem; margin: 0; padding: 0; list-style: none; }
+.creative-readiness-item { display: flex; gap: 0.7rem; align-items: flex-start; min-width: 0; }
+.readiness-mark { flex: 0 0 1.3rem; color: var(--muted); font-weight: 700; }
+.readiness-mark.is-complete { color: var(--success); }
+.creative-readiness-item strong, .creative-readiness-item small { display: block; }
+.creative-readiness-item strong { font-size: 0.8rem; }
+.creative-readiness-item small { margin-top: 0.2rem; color: var(--muted); font-size: 0.72rem; line-height: 1.45; }
+.creative-capability-note { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 1.2rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.creative-capability-note p { margin: 0; color: var(--muted); font-size: 0.74rem; line-height: 1.5; }
+.creative-capability-note strong { display: block; margin-bottom: 0.2rem; color: var(--ink-soft); font-size: 0.75rem; }
+.creative-saved-time { margin: 0.9rem 0 0; color: var(--muted); font-size: 0.72rem; }
+.creative-editor-heading { margin-bottom: 1.25rem; }
+.creative-editor-heading p:last-child { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.78rem; }
+.creative-fieldset { min-width: 0; margin: 0 0 1.2rem; padding: 1rem 0 0; border: 0; border-top: 1px solid var(--line); }
+.creative-fieldset legend { padding: 0 0.6rem 0 0; font-family: var(--font-editorial); font-size: 1.2rem; }
+.creative-legend-note { margin-left: 0.45rem; color: var(--muted); font: 0.68rem var(--font-ui); }
+.creative-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem 1rem; }
+.creative-field { display: grid; align-content: start; gap: 0.38rem; min-width: 0; color: var(--ink-soft); font-size: 0.75rem; font-weight: 650; }
+.creative-field > span { color: var(--muted); font-weight: 400; }
+.creative-field input, .creative-field textarea, .creative-field select { width: 100%; min-height: 2.65rem; padding: 0.62rem 0.72rem; border: 1px solid var(--line-strong); border-radius: var(--corner-sm); background: var(--surface-raised); color: var(--ink); font: 400 0.82rem/1.45 var(--font-ui); }
+.creative-field textarea { resize: vertical; }
+.creative-field input:focus-visible, .creative-field textarea:focus-visible, .creative-field select:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.creative-fieldset:disabled { opacity: 0.72; }
+.creative-field-wide { grid-column: 1 / -1; }
+.creative-empty, .creative-field-hint { color: var(--muted); font-size: 0.77rem; }
+.creative-field-hint { margin: 0.65rem 0 0; }
+.project-scene-list { display: grid; gap: 1rem; margin: 0 0 1rem; padding: 0; list-style: none; }
+.project-scene { min-width: 0; padding: 1rem; border: 1px solid var(--line); background: var(--surface-raised); }
+.project-scene-topline { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.9rem; }
+.project-scene-topline > span { color: var(--muted); font-size: 0.65rem; font-weight: 700; letter-spacing: 0.1em; }
+.project-scene-topline > div { display: flex; gap: 0.35rem; }
+.projects-secondary-action, .projects-text-action { display: inline-flex; min-height: 2.25rem; align-items: center; justify-content: center; padding: 0.42rem 0.7rem; border: 1px solid var(--line-strong); border-radius: var(--corner-sm); background: var(--surface); color: var(--ink-soft); cursor: pointer; font: 600 0.75rem var(--font-ui); }
+.projects-text-action { border-color: transparent; color: var(--danger); }
+.projects-secondary-action:disabled { cursor: not-allowed; opacity: 0.45; }
+.projects-secondary-action:focus-visible, .projects-text-action:focus-visible, .projects-primary-action:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.creative-save-row { align-items: center; padding-top: 1rem; border-top: 1px solid var(--line); }
+.creative-save-state { margin: 0; color: var(--muted); font-size: 0.76rem; }
 @media (max-width: 740px) {
   .projects-workspace { padding-top: 2.5rem; }
   .projects-page-heading { align-items: flex-start; flex-direction: column; gap: 1rem; }
   .workspace-index { display: none; }
+}
+@media (max-width: 640px) {
+  .creative-readiness-list, .creative-capability-note, .creative-form-grid { grid-template-columns: 1fr; }
+  .creative-field-wide { grid-column: auto; }
+  .creative-overview-heading, .creative-editor-heading, .creative-save-row { align-items: flex-start; flex-direction: column; }
 }
 @media (max-width: 520px) {
   .projects-create-row, .owned-project-card { align-items: stretch; flex-direction: column; }

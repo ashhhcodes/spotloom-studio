@@ -11,6 +11,7 @@ import {
   PROJECT_NAME_MAX_LENGTH,
   type OwnedProject,
 } from "./projects-api";
+import { ProjectCreativeWorkspaceEditor } from "./project-creative-workspace";
 import "./projects.css";
 
 export function ProjectsWorkspace({ clerkConfigured }: { clerkConfigured: boolean }) {
@@ -130,14 +131,14 @@ function AuthenticatedProjectsWorkspace() {
           <ul className="owned-project-list">
             {projects.map((project) => (
               <li className="owned-project-card" key={project.id}>
-                <div><small>Saved project</small><h3>{project.name}</h3><p>Project record · {project.id}</p></div>
+                <div><small>Saved project</small><h3>{project.name}</h3><p>Created {formatDate(project.createdAt)} · Updated {formatDate(project.updatedAt)}</p></div>
                 <Link className="projects-open-link" href={`/projects/${encodeURIComponent(project.id)}`}>Open project <span aria-hidden="true">↗</span></Link>
               </li>
             ))}
           </ul>
         )}
       </section>
-      <p className="projects-boundary-note">Saved project records are persistent. Briefs, facts, storyboards, and render state are not saved by this milestone. Northstar remains an illustrative demo.</p>
+      <p className="projects-boundary-note">Saved project records and creative planning data are private to the authenticated project owner. Northstar remains an illustrative demo and is not part of this project list.</p>
     </ProjectsPageFrame>
   );
 }
@@ -201,10 +202,11 @@ function AuthenticatedProjectDetail({ projectId }: { projectId: string }) {
           <section className="projects-detail-card" aria-labelledby="owned-project-title">
             <p className="workspace-label">Authenticated project record</p>
             <h2 id="owned-project-title">{project.name}</h2>
-            <dl><div><dt>Project ID</dt><dd>{project.id}</dd></div><div><dt>Created</dt><dd>{formatDate(project.createdAt)}</dd></div></dl>
-            <p>Project access was checked by the backend. Project briefs, facts, storyboards, and render state are not included in this saved record yet.</p>
+            <dl><div><dt>Project ID</dt><dd>{project.id}</dd></div><div><dt>Created</dt><dd>{formatDate(project.createdAt)}</dd></div><div><dt>Updated</dt><dd>{formatDate(project.updatedAt)}</dd></div></dl>
+            <p>Project access and creative-workspace access are checked by the backend for your signed-in account.</p>
           </section>
         )}
+      {!error && project && <ProjectCreativeWorkspaceEditor key={`${userId}:${project.id}`} projectId={project.id} />}
     </ProjectsPageFrame>
   );
 }
