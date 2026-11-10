@@ -25,6 +25,10 @@ const nextConfig: NextConfig = {
         destination: `${backendUrl.origin}${basePath}/projects`,
       },
       {
+        source: "/api/adforge/projects/:projectId/creative-workspace",
+        destination: `${backendUrl.origin}${basePath}/projects/:projectId/creative-workspace`,
+      },
+      {
         source: "/api/adforge/projects/:projectId",
         destination: `${backendUrl.origin}${basePath}/projects/:projectId`,
       },
