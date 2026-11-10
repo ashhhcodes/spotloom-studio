@@ -92,7 +92,30 @@ Run the API and existing backend tests with:
 python -m pytest .\backend\tests -v
 ```
 
-The local API exposes `GET /health`, `POST /validate/preproduction`, and the separate schema-only `POST /validate/production-package` route. The production-package route accepts a bounded JSON body and reports structural validation only; it does not integrate with the renderer, assets, generation, persistence, or the frontend. These validation routes do not create or render ads.
+The local API exposes `GET /health`, `GET /auth/identity`, authenticated `POST /projects`, `GET /projects`, and `GET /projects/{project_id}` routes, plus `POST /render/demo` for a temporary, silent illustrative MP4. Project routes derive ownership from the verified Clerk session and persist project records only; they do not persist briefs, facts, storyboards, or render state. The separate `POST /validate/preproduction` and schema-only `POST /validate/production-package` routes remain validation-only; production-package validation reports structure and does not integrate with assets, generation, persistence, or the renderer.
+
+## PostgreSQL persistence foundation (explicit developer setup only)
+
+The backend defines SQLAlchemy models and versioned Alembic migrations for internal users, exact Clerk issuer/subject mappings, and owned projects. The authenticated project API maps the verified Clerk issuer/subject pair to a backend-generated internal user, then supports project creation, owner-scoped listing, and owner-scoped retrieval. Unknown and non-owned project IDs return the same `404`; ownership and identity fields are not accepted from clients. This persists project records only. It does not seed or assign `sample-northstar`, or persist project briefs, facts, storyboards, or render state. PostgreSQL is the project-level persistence technology; no hosted database provider or production connection configuration has been selected.
+
+For local development, use a PostgreSQL instance and database controlled by the developer. Copy `backend/.env.example` to `backend/.env` and replace its placeholders with local values. Backend configuration loads that file from the backend directory based on the module path, independent of the current working directory. Values already set in the process environment take precedence. The root `.gitignore` excludes `.env` files; never commit real credentials:
+
+```powershell
+Set-Location .\backend
+..\.venv\Scripts\python.exe -m alembic history
+..\.venv\Scripts\python.exe -m alembic current
+..\.venv\Scripts\python.exe -m alembic upgrade head
+```
+
+`history` inspects migration revisions without connecting. `current` and `upgrade` connect to the configured database. Migrations run only through an explicit Alembic command; importing the application or handling a request never creates an engine, connects, or migrates. To inspect applied versions, use `alembic current` and `alembic history`. Downgrade only a developer-controlled disposable database after reviewing the migration:
+
+```powershell
+..\.venv\Scripts\python.exe -m alembic downgrade -1
+# Remove all tables created by this foundation only on a disposable local database:
+..\.venv\Scripts\python.exe -m alembic downgrade base
+```
+
+The first project-name implementation trims names with Python's Unicode-aware `str.strip()` and limits them to 120 Unicode code points; the length is a provisional engineering bound for review, not an approved numeric product policy. The PostgreSQL check constraint rejects blank names and untrimmed edge whitespace from a fixed set aligned with the supported Python 3.11 whitespace table, while `VARCHAR(120)` enforces the database length limit. This does not claim that PostgreSQL and Python whitespace handling are universally identical: the SQL set is fixed in the migration while Python behavior follows its runtime Unicode data, so changes to the supported Python version require review. The guarded PostgreSQL test covers representative ASCII and non-ASCII cases. Future project services must call `normalize_project_name` before persistence. `updated_at` is refreshed by SQLAlchemy ORM updates only; any direct SQL writer must set it explicitly. No database trigger is installed. Migration upgrade/downgrade integration tests require an explicitly configured loopback `SPOTLOOM_TEST_DATABASE_URL` pointing to a disposable database whose name ends in `_test`; the test creates and removes a temporary schema in that database.
 
 Website scanning remains CLI-only. There is intentionally no `/scan` route: although the scanner validates resolved addresses and each redirect, HTTPX resolves the hostname again when connecting, leaving a DNS-rebinding/time-of-check-to-time-of-use gap. No deployment egress isolation or request-concurrency limit is configured. The scanner also echoes `original_url` in `ScanResult`, so a rejected URL containing credentials would be reflected in serialized output; a future HTTP adapter must redact it. See [`WEBSITE_EXTRACTION.md`](WEBSITE_EXTRACTION.md) for the security boundary and limitations. Do not expose the scanner as a network service until destination pinning or enforceable egress isolation, resource limits, and safe response handling are established.
 
