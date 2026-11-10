@@ -88,6 +88,14 @@ def database_factory():
             "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
             "updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"
         )
+        connection.exec_driver_sql(
+            "CREATE TABLE project_creative_workspaces ("
+            "project_id CHAR(32) PRIMARY KEY REFERENCES projects(id), "
+            "revision INTEGER NOT NULL CHECK (revision >= 1), "
+            "brief JSON NOT NULL, creative_direction JSON NOT NULL, storyboard JSON NOT NULL, "
+            "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     try:
         yield factory
@@ -185,6 +193,173 @@ def test_project_list_and_get_are_owner_scoped(client) -> None:
     assert client.get(f"/projects/{other_id}", headers=_auth("owner")).status_code == 404
 
 
+def test_project_workspace_is_created_only_on_save_and_persists_by_owner(client) -> None:
+    created = client.post("/projects", json={"name": "Campaign workspace"}, headers=_auth("workspace-owner"))
+    project_id = created.json()["id"]
+    endpoint = f"/projects/{project_id}/creative-workspace"
+
+    empty = client.get(endpoint, headers=_auth("workspace-owner"))
+    assert empty.status_code == 200
+    assert empty.json()["revision"] == 0
+    assert empty.json()["storyboard"] == []
+    assert empty.json()["created_at"] is None
+
+    payload = {
+        "revision": 0,
+        "brief": {
+            "campaign_name": "Autumn campaign",
+            "brand_name": "Northstar",
+            "website_url": "https://example.test/",
+            "product_or_service": "Coffee",
+            "target_audience": "Coffee drinkers",
+            "objective": "awareness",
+            "platform": "instagram",
+            "key_selling_points": ["Roasted in small batches"],
+            "call_to_action": "Learn more",
+        },
+        "creative_direction": {
+            "visual_style": "Quiet tabletop scenes",
+            "advertising_tone": "Warm and clear",
+            "primary_message": "A considered everyday cup",
+            "supporting_message": "",
+            "audience_emphasis": "",
+            "brand_personality": "",
+            "desired_video_format": "9:16",
+            "preferred_duration_seconds": 30,
+        },
+        "storyboard": [{
+            "id": "scene-opening",
+            "title": "Opening",
+            "description": "Introduce the campaign",
+            "visual_direction": "A calm tabletop illustration",
+            "on_screen_text": "A good cup, made simple",
+            "narration": "",
+            "duration_seconds": 5,
+            "status": "draft",
+        }],
+    }
+    saved = client.put(endpoint, json=payload, headers=_auth("workspace-owner"))
+    assert saved.status_code == 200
+    saved_body = saved.json()
+    assert saved_body["revision"] == 1
+    assert saved_body["brief"] == payload["brief"]
+    assert saved_body["storyboard"] == payload["storyboard"]
+    assert saved_body["created_at"]
+    assert saved_body["updated_at"]
+
+    reopened = client.get(endpoint, headers=_auth("workspace-owner"))
+    assert reopened.json() == saved_body
+    assert client.get(endpoint, headers=_auth("another-user")).status_code == 404
+
+
+def test_project_workspaces_are_isolated_between_projects(client) -> None:
+    first = client.post("/projects", json={"name": "First campaign"}, headers=_auth("same-owner"))
+    second = client.post("/projects", json={"name": "Second campaign"}, headers=_auth("same-owner"))
+    first_path = f"/projects/{first.json()['id']}/creative-workspace"
+    second_path = f"/projects/{second.json()['id']}/creative-workspace"
+    payload = {
+        "revision": 0,
+        "brief": {"campaign_name": "First only"},
+        "creative_direction": {},
+        "storyboard": [{"id": "scene-first", "title": "First scene"}],
+    }
+
+    saved = client.put(first_path, json=payload, headers=_auth("same-owner"))
+    assert saved.status_code == 200
+    assert saved.json()["brief"]["campaign_name"] == "First only"
+    assert saved.json()["storyboard"][0]["id"] == "scene-first"
+    second_workspace = client.get(second_path, headers=_auth("same-owner"))
+    assert second_workspace.status_code == 200
+    assert second_workspace.json()["revision"] == 0
+    assert second_workspace.json()["brief"]["campaign_name"] == ""
+    assert second_workspace.json()["storyboard"] == []
+
+
+def test_project_workspace_rejects_invalid_urls_extra_identity_and_duplicate_scenes(client) -> None:
+    project = client.post("/projects", json={"name": "Validation workspace"}, headers=_auth())
+    endpoint = f"/projects/{project.json()['id']}/creative-workspace"
+    payload = {
+        "revision": 0,
+        "brief": {"website_url": "javascript:alert(1)"},
+        "creative_direction": {},
+        "storyboard": [],
+    }
+    assert client.put(endpoint, json=payload, headers=_auth()).status_code == 422
+
+    valid_payload = {
+        "revision": 0,
+        "brief": {},
+        "creative_direction": {},
+        "storyboard": [
+            {"id": "duplicate", "title": "One"},
+            {"id": "duplicate", "title": "Two"},
+        ],
+    }
+    assert client.put(endpoint, json=valid_payload, headers=_auth()).status_code == 422
+    forged = {**valid_payload, "owner_user_id": str(uuid4())}
+    assert client.put(endpoint, json=forged, headers=_auth()).status_code == 422
+    assert client.get(endpoint, headers=_auth()).json()["revision"] == 0
+
+
+@pytest.mark.parametrize("storyboard", [
+    [{"id": "scene-1", "title": "  "}],
+    [{"id": "scene-1", "title": "Scene", "duration_seconds": 61}],
+    [{"id": "scene-1", "title": "Scene", "duration_seconds": 1.5}],
+    [{"id": "scene-1", "title": "Scene", "status": "rendered"}],
+    [{"id": "scene-1", "title": "Scene", "unsupported": "value"}],
+])
+def test_project_workspace_rejects_invalid_scene_contract(client, storyboard) -> None:
+    project = client.post("/projects", json={"name": "Invalid scene"}, headers=_auth())
+    endpoint = f"/projects/{project.json()['id']}/creative-workspace"
+    response = client.put(endpoint, json={
+        "revision": 0,
+        "brief": {},
+        "creative_direction": {},
+        "storyboard": storyboard,
+    }, headers=_auth())
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("brief", [
+    {"campaign_name": "x" * 121},
+    {"product_or_service": "x" * 1001},
+    {"key_selling_points": ["point"] * 33},
+])
+def test_project_workspace_rejects_excessive_brief_values(client, brief) -> None:
+    project = client.post("/projects", json={"name": "Brief bounds"}, headers=_auth())
+    endpoint = f"/projects/{project.json()['id']}/creative-workspace"
+    response = client.put(endpoint, json={
+        "revision": 0,
+        "brief": brief,
+        "creative_direction": {},
+        "storyboard": [],
+    }, headers=_auth())
+    assert response.status_code == 422
+
+
+def test_project_workspace_rejects_stale_revision_without_overwriting(client) -> None:
+    project = client.post("/projects", json={"name": "Concurrency workspace"}, headers=_auth())
+    endpoint = f"/projects/{project.json()['id']}/creative-workspace"
+    first_payload = {"revision": 0, "brief": {"campaign_name": "First"}, "creative_direction": {}, "storyboard": []}
+    first = client.put(endpoint, json=first_payload, headers=_auth())
+    assert first.status_code == 200
+
+    stale_payload = {**first_payload, "brief": {"campaign_name": "Stale"}}
+    stale = client.put(endpoint, json=stale_payload, headers=_auth())
+    assert stale.status_code == 409
+    assert client.get(endpoint, headers=_auth()).json()["brief"]["campaign_name"] == "First"
+
+
+def test_project_workspace_routes_require_auth_and_hide_unknown_projects(client) -> None:
+    project_id = uuid4()
+    path = f"/projects/{project_id}/creative-workspace"
+    assert client.get(path).status_code == 401
+    assert client.put(path, json={"revision": 0, "brief": {}, "creative_direction": {}, "storyboard": []}).status_code == 401
+    unknown = client.get(path, headers=_auth())
+    assert unknown.status_code == 404
+    assert unknown.json() == {"detail": "Project not found."}
+
+
 def test_postgresql_project_ownership_isolation_on_disposable_spotloom_test(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -269,6 +444,19 @@ def test_postgresql_project_ownership_isolation_on_disposable_spotloom_test(
             owner_read = test_client.get(f"/projects/{project_id}", headers=user_a)
             assert owner_read.status_code == 200
             assert owner_read.json()["id"] == project_id
+
+            workspace_path = f"/projects/{project_id}/creative-workspace"
+            workspace_payload = {
+                "revision": 0,
+                "brief": {"campaign_name": "PostgreSQL workspace"},
+                "creative_direction": {},
+                "storyboard": [{"id": "pg-opening", "title": "Opening", "duration_seconds": 7}],
+            }
+            workspace_saved = test_client.put(workspace_path, json=workspace_payload, headers=user_a)
+            assert workspace_saved.status_code == 200
+            assert workspace_saved.json()["revision"] == 1
+            assert test_client.get(workspace_path, headers=user_a).json() == workspace_saved.json()
+            assert test_client.get(workspace_path, headers=user_b).status_code == 404
 
             forged = test_client.post(
                 "/projects",

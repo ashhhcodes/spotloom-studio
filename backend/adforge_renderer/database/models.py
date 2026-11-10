@@ -10,6 +10,8 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
+    JSON,
     MetaData,
     String,
     Text,
@@ -100,5 +102,29 @@ class Project(Base):
         nullable=False,
         server_default=func.now(),
         # This updates through SQLAlchemy ORM writes; direct SQL writers must set it.
+        onupdate=func.now(),
+    )
+
+
+class ProjectCreativeWorkspace(Base):
+    """Project-owned campaign and storyboard document, not trusted asset state."""
+
+    __tablename__ = "project_creative_workspaces"
+    __table_args__ = (CheckConstraint("revision >= 1", name="revision_positive"),)
+
+    project_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("projects.id"), primary_key=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    brief: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    creative_direction: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    storyboard: Mapped[list[dict[str, object]]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
         onupdate=func.now(),
     )

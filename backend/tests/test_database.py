@@ -113,7 +113,9 @@ def test_project_name_normalization_handles_unicode_whitespace() -> None:
 
 
 def test_initial_metadata_has_required_keys_constraints_and_indexes() -> None:
-    assert set(Base.metadata.tables) == {"users", "external_identities", "projects"}
+    assert set(Base.metadata.tables) == {
+        "users", "external_identities", "projects", "project_creative_workspaces"
+    }
 
     users = Base.metadata.tables[User.__tablename__]
     identities = Base.metadata.tables[ExternalIdentity.__tablename__]
@@ -162,8 +164,8 @@ def test_alembic_has_one_discoverable_initial_revision() -> None:
     config = Config(str(backend_dir / "alembic.ini"))
     scripts = ScriptDirectory.from_config(config)
 
-    assert scripts.get_current_head() == "20261101_0001"
-    revision = scripts.get_revision("20261101_0001")
+    assert scripts.get_current_head() == "20261111_0002"
+    revision = scripts.get_revision("20261111_0002")
     assert revision is not None
-    assert revision.down_revision is None
-    assert "20261101_0001_initial_identity_projects.py" in revision.path
+    assert revision.down_revision == "20261101_0001"
+    assert "20261111_0002_project_creative_workspace.py" in revision.path

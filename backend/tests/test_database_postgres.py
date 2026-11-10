@@ -70,6 +70,7 @@ def test_initial_migration_upgrades_and_downgrades_disposable_local_postgresql()
                 "users",
                 "external_identities",
                 "projects",
+                "project_creative_workspaces",
             }
 
             inspector = inspect(connection)

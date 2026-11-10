@@ -48,12 +48,20 @@ from adforge_renderer.database import (
 )
 from adforge_renderer.database.models import normalize_project_name
 from adforge_renderer.project_service import (
+    CreativeWorkspaceRevisionConflict,
     IdentityMappingError,
     create_owned_project,
     find_internal_user_id,
     get_or_create_internal_user_id,
     get_owned_project,
+    get_owned_creative_workspace,
     list_owned_projects,
+    save_owned_creative_workspace,
+)
+from adforge_renderer.workspace_schemas import (
+    ProjectCreativeWorkspaceResponse,
+    ProjectCreativeWorkspaceUpdate,
+    empty_workspace_response,
 )
 from adforge_renderer.preproduction_validation import (
     PreproductionValidationResponse,
@@ -281,6 +289,71 @@ def get_project(
     if project is None:
         raise _project_not_found()
     return ProjectResponse.model_validate(project)
+
+
+def _workspace_response(project_id: UUID, workspace) -> ProjectCreativeWorkspaceResponse:
+    if workspace is None:
+        return empty_workspace_response(project_id)
+    return ProjectCreativeWorkspaceResponse(
+        project_id=workspace.project_id,
+        revision=workspace.revision,
+        brief=workspace.brief,
+        creative_direction=workspace.creative_direction,
+        storyboard=workspace.storyboard,
+        created_at=workspace.created_at,
+        updated_at=workspace.updated_at,
+    )
+
+
+@app.get(
+    "/projects/{project_id}/creative-workspace",
+    response_model=ProjectCreativeWorkspaceResponse,
+)
+def get_project_creative_workspace(
+    project_id: UUID,
+    principal: Annotated[VerifiedClerkPrincipal, Depends(require_verified_principal)],
+    session: Annotated[Session, Depends(get_project_session)],
+) -> ProjectCreativeWorkspaceResponse:
+    """Read a project's saved planning workspace without creating state."""
+    user_id = _mapping_user_id(session, principal, create_if_missing=False)
+    if user_id is None or get_owned_project(session, project_id, user_id) is None:
+        raise _project_not_found()
+    workspace = get_owned_creative_workspace(session, project_id, user_id)
+    return _workspace_response(project_id, workspace)
+
+
+@app.put(
+    "/projects/{project_id}/creative-workspace",
+    response_model=ProjectCreativeWorkspaceResponse,
+)
+def put_project_creative_workspace(
+    project_id: UUID,
+    payload: ProjectCreativeWorkspaceUpdate,
+    principal: Annotated[VerifiedClerkPrincipal, Depends(require_verified_principal)],
+    session: Annotated[Session, Depends(get_project_session)],
+) -> ProjectCreativeWorkspaceResponse:
+    """Persist user-authored planning data for the authenticated project owner."""
+    user_id = _mapping_user_id(session, principal, create_if_missing=False)
+    if user_id is None:
+        raise _project_not_found()
+    try:
+        workspace = save_owned_creative_workspace(
+            session,
+            project_id,
+            user_id,
+            expected_revision=payload.revision,
+            brief=payload.brief.model_dump(mode="json"),
+            creative_direction=payload.creative_direction.model_dump(mode="json"),
+            storyboard=[scene.model_dump(mode="json") for scene in payload.storyboard],
+        )
+    except CreativeWorkspaceRevisionConflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This workspace changed since it was loaded. Reload before saving.",
+        ) from None
+    if workspace is None:
+        raise _project_not_found()
+    return _workspace_response(project_id, workspace)
 
 
 @app.post(

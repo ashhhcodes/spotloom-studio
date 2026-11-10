@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from adforge_renderer.database.models import (
     ExternalIdentity,
     Project,
+    ProjectCreativeWorkspace,
     User,
     normalize_project_name,
 )
@@ -19,6 +20,10 @@ from adforge_renderer.identity import VerifiedClerkPrincipal
 
 class IdentityMappingError(RuntimeError):
     """Safe error when a verified identity cannot be resolved consistently."""
+
+
+class CreativeWorkspaceRevisionConflict(RuntimeError):
+    """The project workspace changed since the caller last loaded it."""
 
 
 def find_internal_user_id(
@@ -108,3 +113,78 @@ def get_owned_project(
             Project.owner_user_id == owner_user_id,
         )
     )
+
+
+def get_owned_creative_workspace(
+    session: Session,
+    project_id: UUID,
+    owner_user_id: UUID,
+) -> ProjectCreativeWorkspace | None:
+    """Load a saved workspace only through its owner-scoped project."""
+    return session.scalar(
+        select(ProjectCreativeWorkspace)
+        .join(Project, Project.id == ProjectCreativeWorkspace.project_id)
+        .where(Project.id == project_id, Project.owner_user_id == owner_user_id)
+    )
+
+
+def save_owned_creative_workspace(
+    session: Session,
+    project_id: UUID,
+    owner_user_id: UUID,
+    *,
+    expected_revision: int,
+    brief: dict[str, object],
+    creative_direction: dict[str, object],
+    storyboard: list[dict[str, object]],
+) -> ProjectCreativeWorkspace | None:
+    """Create/update an owned planning document with optimistic concurrency.
+
+    Revision zero represents an unsaved workspace. Inserts use a savepoint so
+    concurrent first saves cannot poison the surrounding API transaction.
+    Existing revisions are updated with a compare-and-swap predicate.
+    """
+    if get_owned_project(session, project_id, owner_user_id) is None:
+        return None
+
+    current = session.get(ProjectCreativeWorkspace, project_id)
+    if expected_revision == 0:
+        if current is not None:
+            raise CreativeWorkspaceRevisionConflict
+        row = ProjectCreativeWorkspace(
+            project_id=project_id,
+            revision=1,
+            brief=brief,
+            creative_direction=creative_direction,
+            storyboard=storyboard,
+        )
+        try:
+            with session.begin_nested():
+                session.add(row)
+                session.flush()
+        except IntegrityError:
+            raise CreativeWorkspaceRevisionConflict from None
+        session.refresh(row)
+        return row
+
+    if current is None or current.revision != expected_revision:
+        raise CreativeWorkspaceRevisionConflict
+
+    result = session.execute(
+        update(ProjectCreativeWorkspace)
+        .where(
+            ProjectCreativeWorkspace.project_id == project_id,
+            ProjectCreativeWorkspace.revision == expected_revision,
+        )
+        .values(
+            brief=brief,
+            creative_direction=creative_direction,
+            storyboard=storyboard,
+            revision=expected_revision + 1,
+            updated_at=func.now(),
+        )
+    )
+    if result.rowcount != 1:
+        raise CreativeWorkspaceRevisionConflict
+    session.refresh(current)
+    return current

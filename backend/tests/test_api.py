@@ -131,6 +131,8 @@ def test_expected_routes_are_exposed_and_scan_remains_unavailable() -> None:
         ("/projects", "POST"),
         ("/projects", "GET"),
         ("/projects/{project_id}", "GET"),
+        ("/projects/{project_id}/creative-workspace", "GET"),
+        ("/projects/{project_id}/creative-workspace", "PUT"),
         ("/validate/preproduction", "POST"),
         ("/validate/production-package", "POST"),
         ("/render/demo", "POST"),
