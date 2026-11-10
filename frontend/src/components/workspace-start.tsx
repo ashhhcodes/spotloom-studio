@@ -81,7 +81,7 @@ export function WorkspaceStart() {
       </section>
 
       <section className="projects-section" id="projects" aria-labelledby="projects-title">
-        <div className="projects-heading"><div><p className="workspace-label">A starting point</p><h2 id="projects-title">Your workspace</h2></div><p>Sample only · no saved projects yet</p></div>
+        <div className="projects-heading"><div><p className="workspace-label">A starting point</p><h2 id="projects-title">Your workspace</h2></div><div className="projects-heading-actions"><p>Northstar is illustrative; saved projects are separate.</p><Link className="sample-badge" href="/projects">Manage saved projects <span aria-hidden="true">↗</span></Link></div></div>
         <article className="sample-project">
           <div className="sample-art" aria-hidden="true">N<span>.</span></div>
           <div><small>Sample project · Coffee</small><h3>Northstar Coffee</h3><p>A layout example for a small-batch coffee brand. This is illustrative content.</p></div>
