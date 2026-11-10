@@ -52,8 +52,14 @@
 .readiness-next-step { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(17rem, 0.8fr); align-items: center; gap: 2rem; margin-top: clamp(1.8rem, 3vw, 2.6rem); padding: clamp(1.2rem, 3vw, 2rem); border: 1px solid var(--line); background: var(--surface); }
 .readiness-next-step .readiness-kicker { margin-bottom: 0.4rem; }
 .readiness-next-step > div:first-child > p:last-child { max-width: 42rem; margin: 0.55rem 0 0; color: var(--muted); font-size: 0.82rem; }
-.readiness-next-actions button { width: 100%; min-height: 2.9rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.65rem 0.85rem; border: 1px solid var(--line-strong); background: var(--canvas); color: var(--muted); font: inherit; font-size: 0.78rem; font-weight: 650; cursor: not-allowed; opacity: 0.82; }
+.readiness-next-actions button { width: 100%; min-height: 2.9rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.65rem 0.85rem; border: 1px solid var(--accent-strong); background: var(--accent-strong); color: var(--accent-contrast); font: inherit; font-size: 0.78rem; font-weight: 650; cursor: pointer; transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease; }
+.readiness-next-actions button:hover:not(:disabled) { border-color: var(--ink); background: var(--ink); color: var(--surface-raised); }
+.readiness-next-actions button:disabled { border-color: var(--line-strong); background: var(--surface-raised); color: var(--ink); cursor: wait; }
+.readiness-next-actions button:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 .readiness-next-actions p { margin: 0.45rem 0 0.9rem; color: var(--muted); font-size: 0.69rem; }
+.demo-render-result { display: grid; gap: 0.6rem; margin-bottom: 0.9rem; }
+.demo-render-result video { width: 100%; max-height: 34rem; border: 1px solid var(--line); background: var(--canvas); }
+.demo-render-result a { width: fit-content; color: var(--accent-strong); font-size: 0.76rem; font-weight: 650; text-underline-offset: 0.2em; }
 .readiness-next-actions a { color: var(--accent-strong); font-size: 0.76rem; text-underline-offset: 0.2em; }
 .readiness-action-links { display: flex; flex-wrap: wrap; align-items: center; column-gap: 1.1rem; row-gap: 0.65rem; }
 .readiness-footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding-top: 1rem; }

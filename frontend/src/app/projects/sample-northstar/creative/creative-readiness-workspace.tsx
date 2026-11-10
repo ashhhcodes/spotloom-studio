@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNorthstarProjectState } from "../demo-project-provider";
+import { northstarDemoProject } from "../review/demo-facts";
 import {
   PreproductionApiError,
   requestPreproductionEvaluation,
@@ -16,6 +17,8 @@ import {
   type FindingSeverity,
   type WorkspaceRoute,
 } from "../preproduction-validation";
+import DemoRenderControl from "./demo-render-control";
+import { toDemoRenderInput } from "./demo-render-api";
 
 const categoryLabels: Record<FindingCategory, string> = {
   brief: "Creative brief",
@@ -63,7 +66,14 @@ function backendRuntimeText(response: PreproductionResponse) {
 }
 
 export default function CreativeReadinessWorkspace() {
-  const { facts, brief, scenes } = useNorthstarProjectState();
+  const { facts, brief, scenes, brandPalette } = useNorthstarProjectState();
+  const renderInput = useMemo(() => toDemoRenderInput({
+    businessName: facts.find((fact) => fact.category.toLowerCase() === "business name")?.claim ?? northstarDemoProject.name,
+    productOrService: brief.productOrOffer,
+    storyboardScenes: scenes,
+    cta: brief.callToAction,
+    brandPalette,
+  }), [facts, brief.productOrOffer, brief.callToAction, scenes, brandPalette]);
   const result = useMemo(() => validateNorthstarPreproduction(facts, brief, scenes), [facts, brief, scenes]);
   const request = useMemo(() => toPreproductionRequest(facts, brief, scenes), [facts, brief, scenes]);
   const requestKey = useMemo(() => JSON.stringify(request), [request]);
@@ -235,8 +245,8 @@ export default function CreativeReadinessWorkspace() {
       </section>
 
       <section className="readiness-next-step" aria-labelledby="readiness-next-title">
-        <div><p className="readiness-kicker">Generation unavailable</p><h2 id="readiness-next-title">A review result does not create an ad.</h2><p>AI semantic analysis, legal and advertising-policy checks, real media generation, and backend integration are not implemented. Passing these local checks does not establish accuracy or publication safety.</p></div>
-        <div className="readiness-next-actions"><button type="button" disabled aria-describedby="readiness-disabled-note">Generate Ad <span aria-hidden="true">↗</span></button><p id="readiness-disabled-note">Unavailable in this frontend-only demo. No script, video, or advertisement will be generated.</p><nav className="readiness-action-links" aria-label="Northstar project workspaces"><Link href="/projects/sample-northstar/brief">Review the creative brief</Link><Link href="/projects/sample-northstar/storyboard">Edit storyboard scenes</Link><Link href="/projects/sample-northstar/review">Review business facts</Link><Link href="/projects/sample-northstar/package">Preview production package</Link></nav></div>
+        <div><p className="readiness-kicker">Local illustrative render</p><h2 id="readiness-next-title">Create a short draft video from this workspace.</h2><p>The renderer creates one illustrative H.264 MP4 scene for each submitted storyboard scene, in order, using its title, on-screen text, selected Hook, Benefit, Proof, or CTA layout, duration, and selected cut or 0.35-second crossfade into the scene. The selected primary and accent colors are shared across all layouts. It also uses the current project name and brief product/offer and CTA. The local demo accepts 1–6 uniquely identified scenes and a rendered timeline up to 30 seconds. Narration, visual direction, transition notes, and supplied media are not rendered. The video is silent, temporary, and not publication-ready.</p></div>
+        <div><DemoRenderControl input={renderInput} /><nav className="readiness-action-links" aria-label="Northstar project workspaces"><Link href="/projects/sample-northstar/brief">Review the brief</Link><Link href="/projects/sample-northstar/storyboard">Edit storyboard scenes</Link><Link href="/projects/sample-northstar/review">Review business facts</Link><Link href="/projects/sample-northstar/package">Preview production package</Link></nav></div>
       </section>
 
       <footer className="readiness-footer"><p>Demo only · Local deterministic checks · No independently validated source evidence</p><Link href="/projects/sample-northstar">Northstar sample project</Link></footer>

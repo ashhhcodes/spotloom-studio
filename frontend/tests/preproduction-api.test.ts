@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { initialNorthstarBrief } from "../src/app/projects/sample-northstar/creative-brief";
+import { initialNorthstarBrief } from "../src/app/projects/sample-northstar/creative-brief.ts";
 import {
   isPreproductionResponse,
   PreproductionApiError,
   requestPreproductionEvaluation,
   toPreproductionRequest,
   type PreproductionResponse,
-} from "../src/app/projects/sample-northstar/creative/preproduction-api";
-import { northstarDemoProject } from "../src/app/projects/sample-northstar/review/demo-facts";
-import { cloneInitialStoryboard } from "../src/app/projects/sample-northstar/storyboard-model";
+} from "../src/app/projects/sample-northstar/creative/preproduction-api.ts";
+import { northstarDemoProject } from "../src/app/projects/sample-northstar/review/demo-facts.ts";
+import { cloneInitialStoryboard } from "../src/app/projects/sample-northstar/storyboard-model.ts";
 
 const facts = northstarDemoProject.facts;
 const brief = { ...initialNorthstarBrief, reliedUponFactIds: [...initialNorthstarBrief.reliedUponFactIds] };
@@ -69,7 +69,21 @@ test("request mapping sends only current facts, brief, and ordered scenes", () =
   assert.deepEqual(Object.keys(request.facts), ["facts"]);
   assert.deepEqual(request.facts.facts, facts);
   assert.deepEqual(request.brief, brief);
-  assert.deepEqual(request.storyboard.scenes, scenes);
+  assert.deepEqual(request.storyboard.scenes, scenes.map((scene) => ({
+    id: scene.id,
+    title: scene.title,
+    narrativePurpose: scene.narrativePurpose,
+    visualDirection: scene.visualDirection,
+    onScreenText: scene.onScreenText,
+    narration: scene.narration,
+    durationSeconds: scene.durationSeconds,
+    transitionNote: scene.transitionNote,
+  })));
+  assert.deepEqual(Object.keys(request.storyboard.scenes[0] ?? {}).sort(), [
+    "durationSeconds", "id", "narration", "narrativePurpose", "onScreenText", "title", "transitionNote", "visualDirection",
+  ]);
+  assert.equal("role" in (request.storyboard.scenes[0] ?? {}), false);
+  assert.equal("transition" in (request.storyboard.scenes[0] ?? {}), false);
   assert.equal(request.facts.facts[1].status, "approved");
   assert.equal(request.facts.facts[1].source.kind, "illustrative-placeholder");
   assert.equal("readiness" in request, false);

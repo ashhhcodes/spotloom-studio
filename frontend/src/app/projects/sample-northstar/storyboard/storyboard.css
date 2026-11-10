@@ -19,6 +19,16 @@
 .storyboard-overview span { color: var(--muted); font-size: 0.68rem; }
 .storyboard-overview strong { font-family: var(--font-editorial); font-size: 1.2rem; font-weight: 400; }
 .storyboard-validation-summary { margin: 1rem 0 0; padding: 0.7rem 0.85rem; border: 1px solid var(--warning); color: var(--ink-soft); font-size: 0.77rem; }
+.storyboard-brand-profile { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; margin-top: 1rem; padding: 1rem 1.1rem; border: 1px solid var(--line); background: var(--surface); }
+.storyboard-brand-profile h2 { margin: 0; font-family: var(--font-editorial); font-size: 1.4rem; font-weight: 400; }
+.storyboard-brand-profile p:last-child { max-width: 36rem; margin: 0.35rem 0 0; color: var(--muted); font-size: 0.72rem; }
+.storyboard-brand-colors { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.storyboard-brand-colors label { display: flex; align-items: center; gap: 0.55rem; color: var(--ink-soft); font-size: 0.72rem; font-weight: 650; }
+.storyboard-brand-swatch { width: 1.3rem; height: 1.3rem; border: 1px solid var(--line-strong); border-radius: 50%; }
+.storyboard-brand-colors input { width: 5.6rem; min-height: 2.35rem; padding: 0.4rem 0.5rem; border: 1px solid var(--line-strong); border-radius: var(--corner-sm); background: var(--surface-raised); color: var(--ink); font: 600 0.72rem/1 ui-monospace, monospace; }
+.storyboard-brand-colors input[aria-invalid="true"] { border-color: var(--danger); }
+.storyboard-brand-colors input:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.storyboard-brand-format { margin: 0; color: var(--muted); font-size: 0.68rem; }
 .storyboard-scenes { padding-top: clamp(2.4rem, 5vw, 4rem); }
 .storyboard-section-heading { display: flex; align-items: end; justify-content: space-between; gap: 1rem; padding-bottom: 0.85rem; border-bottom: 1px solid var(--line); }
 .storyboard-section-heading .storyboard-kicker { margin-bottom: 0.35rem; }
@@ -39,10 +49,13 @@
 .storyboard-fields { display: grid; grid-template-columns: minmax(8rem, 0.33fr) minmax(0, 1fr); align-items: start; gap: 0.6rem 1rem; padding: 1rem 1.1rem 1.2rem; }
 .storyboard-fields label { padding-top: 0.55rem; color: var(--ink-soft); font-size: 0.72rem; font-weight: 650; }
 .storyboard-fields label span { color: var(--muted); font-size: 0.63rem; font-weight: 400; }
-.storyboard-fields input, .storyboard-fields textarea { width: 100%; min-width: 0; min-height: 2.5rem; padding: 0.55rem 0.65rem; border: 1px solid var(--line-strong); border-radius: var(--corner-sm); background: var(--surface-raised); color: var(--ink); font: inherit; font-size: 0.77rem; font-weight: 400; }
+.storyboard-fields input, .storyboard-fields textarea, .storyboard-fields select { width: 100%; min-width: 0; min-height: 2.5rem; padding: 0.55rem 0.65rem; border: 1px solid var(--line-strong); border-radius: var(--corner-sm); background: var(--surface-raised); color: var(--ink); font: inherit; font-size: 0.77rem; font-weight: 400; }
+.storyboard-fields select:disabled { opacity: 0.7; }
+.storyboard-fields :is(input, textarea, select):focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 .storyboard-fields textarea { min-height: 4.1rem; resize: vertical; line-height: 1.45; }
 .storyboard-fields input[aria-invalid="true"] { border-color: var(--danger); }
 .storyboard-field-error { grid-column: 2; margin: -0.35rem 0 0; color: var(--danger); font-size: 0.68rem; }
+.storyboard-field-hint { grid-column: 2; margin: -0.35rem 0 0; color: var(--muted); font-size: 0.68rem; }
 .storyboard-empty { padding: 1.2rem; border: 1px dashed var(--line-strong); color: var(--muted); font-size: 0.82rem; }
 .storyboard-production-note { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; margin-top: 2.5rem; padding: clamp(1.1rem, 3vw, 1.8rem); border: 1px solid var(--line); background: var(--surface); }
 .storyboard-production-note .storyboard-kicker { margin-bottom: 0.35rem; }
@@ -70,6 +83,8 @@
   .storyboard-fields { grid-template-columns: 1fr; gap: 0.35rem; }
   .storyboard-fields label { padding-top: 0.55rem; }
   .storyboard-field-error { grid-column: 1; }
+  .storyboard-field-hint { grid-column: 1; }
   .storyboard-production-note { align-items: flex-start; flex-direction: column; }
+  .storyboard-brand-profile { align-items: flex-start; flex-direction: column; }
   .storyboard-footer { align-items: flex-start; flex-direction: column; }
 }

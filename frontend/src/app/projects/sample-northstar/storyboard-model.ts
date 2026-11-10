@@ -6,8 +6,21 @@ export type StoryboardScene = {
   onScreenText: string;
   narration: string;
   durationSeconds: number;
+  transition: "cut" | "fade";
+  role?: StoryboardSceneRole;
   transitionNote: string;
 };
+
+export type StoryboardSceneRole = "hook" | "benefit" | "proof" | "cta";
+export type IllustrativeBrandPalette = { primary: string; accent: string };
+
+export const DEFAULT_ILLUSTRATIVE_BRAND_PALETTE: IllustrativeBrandPalette = {
+  primary: "#D98B45",
+  accent: "#F5EFE7",
+};
+
+export const STORYBOARD_FADE_SECONDS = 0.35;
+export const MAX_ILLUSTRATIVE_RENDER_SECONDS = 30;
 
 /** A scene duration is valid for planning only when it is a whole second from 1 to 60. */
 export function isValidStoryboardDuration(value: unknown): value is number {
@@ -18,6 +31,16 @@ export function isValidStoryboardDuration(value: unknown): value is number {
 export function calculateStoryboardRuntime(durations: readonly unknown[]): number | null {
   if (durations.length === 0 || !durations.every(isValidStoryboardDuration)) return null;
   return durations.reduce<number>((total, duration) => total + (duration as number), 0);
+}
+
+/** Calculate the local illustrative timeline after supported crossfade overlaps. */
+export function calculateIllustrativeRenderRuntime(scenes: readonly StoryboardScene[]): number | null {
+  const durations = scenes.map((scene) => scene.durationSeconds);
+  if (!durations.length || !durations.every(isValidStoryboardDuration)
+    || scenes.some((scene, index) => (scene.transition !== "cut" && scene.transition !== "fade")
+      || (index === 0 && scene.transition !== "cut"))) return null;
+  return durations.reduce<number>((total, duration) => total + duration, 0)
+    - scenes.slice(1).filter((scene) => scene.transition === "fade").length * STORYBOARD_FADE_SECONDS;
 }
 
 /** Illustrative creative planning only; no footage, narration, or advertisement exists. */
@@ -31,6 +54,8 @@ export const initialNorthstarStoryboard: StoryboardScene[] = [
     narration: "Take a moment.",
     durationSeconds: 4,
     transitionNote: "Fade in, then hold briefly.",
+    transition: "cut",
+    role: "hook",
   },
   {
     id: "northstar-scene-middle",
@@ -41,6 +66,8 @@ export const initialNorthstarStoryboard: StoryboardScene[] = [
     narration: "A little room in the day.",
     durationSeconds: 6,
     transitionNote: "Use a gentle cut between moments.",
+    transition: "cut",
+    role: "benefit",
   },
   {
     id: "northstar-scene-close",
@@ -51,6 +78,8 @@ export const initialNorthstarStoryboard: StoryboardScene[] = [
     narration: "Learn more.",
     durationSeconds: 5,
     transitionNote: "Hold the end card, then fade out.",
+    transition: "fade",
+    role: "cta",
   },
 ];
 
@@ -87,5 +116,6 @@ export function moveStoryboardScene(
   if (index < 0 || destination < 0 || destination >= scenes.length) return [...scenes];
   const reordered = [...scenes];
   [reordered[index], reordered[destination]] = [reordered[destination], reordered[index]];
+  if (reordered[0].transition !== "cut") reordered[0] = { ...reordered[0], transition: "cut" };
   return reordered;
 }

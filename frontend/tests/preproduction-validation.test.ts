@@ -5,8 +5,8 @@ import {
   decideDemoFact,
   northstarDemoProject,
   type ProjectFact,
-} from "../src/app/projects/sample-northstar/review/demo-facts";
-import { initialNorthstarBrief, type CreativeBrief } from "../src/app/projects/sample-northstar/creative-brief";
+} from "../src/app/projects/sample-northstar/review/demo-facts.ts";
+import { initialNorthstarBrief, type CreativeBrief } from "../src/app/projects/sample-northstar/creative-brief.ts";
 import {
   calculateStoryboardRuntime,
   appendStoryboardScene,
@@ -15,8 +15,8 @@ import {
   isValidStoryboardDuration,
   moveStoryboardScene,
   type StoryboardScene,
-} from "../src/app/projects/sample-northstar/storyboard-model";
-import { validateNorthstarPreproduction, type FindingSeverity } from "../src/app/projects/sample-northstar/preproduction-validation";
+} from "../src/app/projects/sample-northstar/storyboard-model.ts";
+import { validateNorthstarPreproduction, type FindingSeverity } from "../src/app/projects/sample-northstar/preproduction-validation.ts";
 
 const severityOrder: Record<FindingSeverity, number> = { blocker: 0, warning: 1, info: 2 };
 

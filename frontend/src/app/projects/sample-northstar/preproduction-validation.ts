@@ -3,9 +3,9 @@ import {
   getApprovedDemoFacts,
   type ProjectFact,
   type ReviewStatus,
-} from "./review/demo-facts";
+} from "./review/demo-facts.ts";
 import type { CreativeBrief } from "./creative-brief";
-import { calculateStoryboardRuntime, isValidStoryboardDuration, type StoryboardScene } from "./storyboard-model";
+import { calculateStoryboardRuntime, isValidStoryboardDuration, type StoryboardScene } from "./storyboard-model.ts";
 
 export type FindingSeverity = "blocker" | "warning" | "info";
 export type FindingCategory = "brief" | "facts" | "storyboard" | "runtime" | "grounding" | "production";
@@ -445,7 +445,7 @@ export function validateNorthstarPreproduction(
     severity: "info",
     category: "production",
     title: "Demo only — production checks are not implemented",
-    explanation: "This is a local deterministic pre-production check. Content is illustrative; there is no independent source verification, semantic AI analysis, legal or advertising-policy review, backend submission, or real media generation.",
+    explanation: "This is a local deterministic pre-production check. Content is illustrative; there is no independent source verification, semantic AI analysis, or legal or advertising-policy review. The separate local render creates only a temporary silent illustrative MP4, not production media.",
     resolution: "Use this result only to organize a human review. Passing checks does not establish factual accuracy or publication safety.",
     destinationRoutes: [readinessRoute],
     blocksReadiness: false,

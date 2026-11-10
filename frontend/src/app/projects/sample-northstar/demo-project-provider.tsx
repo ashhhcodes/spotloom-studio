@@ -15,16 +15,20 @@ import {
   deleteStoryboardScene,
   moveStoryboardScene,
   updateStoryboardScene,
+  DEFAULT_ILLUSTRATIVE_BRAND_PALETTE,
   type StoryboardScene,
+  type IllustrativeBrandPalette,
 } from "./storyboard-model";
 
 type NorthstarProjectState = {
   facts: ProjectFact[];
   brief: CreativeBrief;
   scenes: StoryboardScene[];
+  brandPalette: IllustrativeBrandPalette;
   decideFact: (factId: string, decision: ReviewDecision) => void;
   correctFact: (factId: string, correctedClaim: string) => void;
   updateBrief: (patch: Partial<CreativeBrief>) => void;
+  updateBrandPalette: (patch: Partial<IllustrativeBrandPalette>) => void;
   resetBrief: () => void;
   updateScene: (sceneId: string, patch: Partial<StoryboardScene>) => void;
   addScene: () => void;
@@ -47,11 +51,13 @@ export function NorthstarDemoProjectProvider({ children }: { children: ReactNode
   })));
   const [brief, setBrief] = useState<CreativeBrief>(cloneInitialBrief);
   const [scenes, setScenes] = useState<StoryboardScene[]>(cloneInitialStoryboard);
+  const [brandPalette, setBrandPalette] = useState<IllustrativeBrandPalette>(() => ({ ...DEFAULT_ILLUSTRATIVE_BRAND_PALETTE }));
 
   const value = useMemo<NorthstarProjectState>(() => ({
     facts,
     brief,
     scenes,
+    brandPalette,
     decideFact: (factId, decision) => setFacts((current) => current.map((fact) =>
       fact.id === factId ? decideDemoFact(fact, decision) : fact,
     )),
@@ -65,6 +71,7 @@ export function NorthstarDemoProjectProvider({ children }: { children: ReactNode
       reliedUponFactIds: patch.reliedUponFactIds ? [...patch.reliedUponFactIds] : current.reliedUponFactIds,
     })),
     resetBrief: () => setBrief(cloneInitialBrief()),
+    updateBrandPalette: (patch) => setBrandPalette((current) => ({ ...current, ...patch })),
     updateScene: (sceneId, patch) => setScenes((current) => updateStoryboardScene(current, sceneId, patch)),
     addScene: () => {
       const scene: StoryboardScene = {
@@ -75,6 +82,8 @@ export function NorthstarDemoProjectProvider({ children }: { children: ReactNode
         onScreenText: "",
         narration: "",
         durationSeconds: 5,
+        transition: "cut",
+        role: "benefit",
         transitionNote: "",
       };
       setScenes((current) => appendStoryboardScene(current, scene));
@@ -82,7 +91,7 @@ export function NorthstarDemoProjectProvider({ children }: { children: ReactNode
     deleteScene: (sceneId) => setScenes((current) => deleteStoryboardScene(current, sceneId)),
     moveScene: (sceneId, direction) => setScenes((current) => moveStoryboardScene(current, sceneId, direction)),
     resetStoryboard: () => setScenes(cloneInitialStoryboard()),
-  }), [facts, brief, scenes]);
+  }), [facts, brief, scenes, brandPalette]);
 
   return <NorthstarProjectContext.Provider value={value}>{children}</NorthstarProjectContext.Provider>;
 }

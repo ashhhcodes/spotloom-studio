@@ -5,8 +5,13 @@ import type { ProjectFact } from "../review/demo-facts";
 export type PreproductionSnapshot = {
   facts: { facts: ProjectFact[] };
   brief: CreativeBrief;
-  storyboard: { scenes: StoryboardScene[] };
+  storyboard: { scenes: PreproductionStoryboardScene[] };
 };
+
+/** Editorial scene fields accepted by the pre-production contract. */
+export type PreproductionStoryboardScene = Pick<StoryboardScene,
+  "id" | "title" | "narrativePurpose" | "visualDirection" | "onScreenText" | "narration" | "durationSeconds" | "transitionNote"
+>;
 
 export type PreproductionRequest = PreproductionSnapshot & { correlationId: string };
 
@@ -53,14 +58,21 @@ export type SafeValidationIssue = { path: string; message: string };
 export type PreproductionApiErrorKind = "unavailable" | "http" | "invalid-request" | "invalid-response";
 
 export class PreproductionApiError extends Error {
+  readonly kind: PreproductionApiErrorKind;
+  readonly status?: number;
+  readonly issues: SafeValidationIssue[];
+
   constructor(
-    readonly kind: PreproductionApiErrorKind,
+    kind: PreproductionApiErrorKind,
     message: string,
-    readonly status?: number,
-    readonly issues: SafeValidationIssue[] = [],
+    status?: number,
+    issues: SafeValidationIssue[] = [],
   ) {
     super(message);
     this.name = "PreproductionApiError";
+    this.kind = kind;
+    this.status = status;
+    this.issues = issues;
   }
 }
 
@@ -208,7 +220,16 @@ export function toPreproductionRequest(
   return {
     facts: { facts: facts.map((fact) => ({ ...fact, revisions: [...fact.revisions], source: { ...fact.source } })) },
     brief: { ...brief, reliedUponFactIds: [...brief.reliedUponFactIds] },
-    storyboard: { scenes: scenes.map((scene) => ({ ...scene })) },
+    storyboard: { scenes: scenes.map((scene) => ({
+      id: scene.id,
+      title: scene.title,
+      narrativePurpose: scene.narrativePurpose,
+      visualDirection: scene.visualDirection,
+      onScreenText: scene.onScreenText,
+      narration: scene.narration,
+      durationSeconds: scene.durationSeconds,
+      transitionNote: scene.transitionNote,
+    })) },
   };
 }
 
