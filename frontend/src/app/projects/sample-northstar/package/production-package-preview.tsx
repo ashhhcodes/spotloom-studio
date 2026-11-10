@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useMemo } from "react";
 import { useNorthstarProjectState } from "../demo-project-provider";
 import { getApprovedDemoFacts } from "../review/demo-facts";
+import ProductionPackagePreflight from "./production-package-preflight";
 import {
   validateNorthstarPreproduction,
   type FindingSeverity,
@@ -84,9 +85,11 @@ export default function ProductionPackagePreview() {
         <span aria-hidden="true">i</span>
         <div>
           <h2 id="package-notice-title">Illustrative plan · temporary shared state</h2>
-          <p>Changes are shared across Northstar project pages in this tab and reset on refresh. No data is sent to a backend, and no video, audio, images, or finished advertisement have been generated.</p>
+          <p>Changes are shared across Northstar project pages in this tab and reset on refresh. Preview data is not submitted automatically; only JSON explicitly submitted in the preflight below is sent to the configured backend. No video, audio, images, or finished advertisement have been generated.</p>
         </div>
       </aside>
+
+      <ProductionPackagePreflight />
 
       <section className="package-section package-brief" aria-labelledby="package-brief-title">
         <div className="package-section-heading">
@@ -241,7 +244,7 @@ export default function ProductionPackagePreview() {
           <li>Claim matching uses the validator’s limited exact-text rule; it does not semantically ground all narration or on-screen text.</li>
           <li>Legal review and advertising-policy compliance checks are not implemented.</li>
           <li>No video, audio, images, or finished advertisement have been generated.</li>
-          <li>No data is sent to a backend.</li>
+          <li>The illustrative preview data is not sent to a backend automatically.</li>
         </ul>
       </aside>
 

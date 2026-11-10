@@ -1,3 +1,61 @@
+.package-preflight {
+  max-width: 1180px;
+  margin: 2rem auto;
+  padding: 2rem clamp(1rem, 4vw, 2rem);
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+.package-preflight-boundary { max-width: 72ch; color: var(--muted); line-height: 1.65; }
+.package-preflight form { display: grid; gap: 0.75rem; }
+.package-preflight label { color: var(--ink); font-size: 0.82rem; font-weight: 650; }
+.package-preflight textarea {
+  width: 100%;
+  min-height: 18rem;
+  padding: 1rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 0.35rem;
+  background: var(--surface-raised);
+  color: var(--ink);
+  caret-color: var(--ink);
+  font: 0.78rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+  resize: vertical;
+}
+.package-preflight textarea::placeholder { color: var(--muted); opacity: 1; }
+.package-preflight textarea::selection { background: var(--accent-strong); color: var(--accent-contrast); }
+.package-preflight textarea:hover { border-color: var(--muted); }
+.package-preflight textarea:focus-visible,
+.package-preflight button:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+.package-preflight textarea:focus-visible { border-color: var(--accent-strong); }
+.package-preflight button {
+  justify-self: start;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--accent-strong);
+  border-radius: 0.25rem;
+  background: var(--accent-strong);
+  color: var(--accent-contrast);
+  font: inherit;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease;
+}
+.package-preflight button:hover:not(:disabled) {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--surface-raised);
+}
+.package-preflight button:disabled {
+  border-color: var(--line-strong);
+  background: var(--surface-raised);
+  color: var(--ink);
+  cursor: wait;
+}
+.package-preflight-result { margin-top: 1.25rem; color: var(--ink); overflow-wrap: anywhere; }
+.package-preflight-result ul { display: grid; gap: 0.65rem; padding-left: 1.2rem; }
+.package-preflight-valid { color: #226442; font-weight: 700; }
+.package-preflight-invalid { color: #8a3f36; font-weight: 700; }
+
 .package-page { max-width: 1180px; margin-inline: auto; padding: clamp(1.8rem, 4vw, 3.5rem) clamp(0.25rem, 1vw, 1rem) 3.5rem; }
 .package-breadcrumb ol { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0; padding: 0; list-style: none; color: var(--muted); font-size: 0.76rem; }
 .package-breadcrumb li + li::before { content: "/"; margin-right: 0.5rem; color: var(--line-strong); }
