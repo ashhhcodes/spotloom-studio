@@ -9,6 +9,7 @@
 .app-nav { display: flex; align-items: center; gap: clamp(1rem, 3vw, 2.5rem); }
 .app-nav a { min-height: 2.75rem; display: inline-flex; align-items: center; border-bottom: 2px solid transparent; color: var(--muted); font-size: 0.84rem; text-decoration: none; }
 .app-nav a:hover, .app-nav a[aria-current] { border-color: var(--accent); color: var(--ink); }
+.app-header-tools { justify-self: end; display: flex; align-items: center; gap: 0.85rem; }
 .app-header .theme-picker { justify-self: end; }
 .app-main { min-height: calc(100vh - 10rem); }
 .app-footer { min-height: 4.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.75rem; }
@@ -16,7 +17,8 @@
 @media (max-width: 700px) {
   .app-header { min-height: auto; grid-template-columns: 1fr auto; gap: 0.5rem 0.75rem; padding-block: 0.8rem; }
   .app-wordmark { grid-column: 1; grid-row: 1; }
-  .app-header .theme-picker { grid-column: 2; grid-row: 1; min-width: 10.5rem; }
+  .app-header-tools { grid-column: 2; grid-row: 1; gap: 0.45rem; }
+  .app-header .theme-picker { min-width: 10.5rem; }
   .app-header .theme-picker legend { text-align: right; }
   .app-header .theme-option { min-height: 1.8rem; font-size: 0.65rem; }
   .app-nav { grid-column: 1 / -1; grid-row: 2; gap: 1.5rem; border-top: 1px solid var(--line); }

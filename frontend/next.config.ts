@@ -15,10 +15,32 @@ const nextConfig: NextConfig = {
     }
     const basePath = backendUrl.pathname.replace(/\/+$/, "");
 
-    return [{
-      source: "/api/adforge/validate/preproduction",
-      destination: `${backendUrl.origin}${basePath}/validate/preproduction`,
-    }];
+    return [
+      {
+        source: "/api/adforge/auth/identity",
+        destination: `${backendUrl.origin}${basePath}/auth/identity`,
+      },
+      {
+        source: "/api/adforge/projects",
+        destination: `${backendUrl.origin}${basePath}/projects`,
+      },
+      {
+        source: "/api/adforge/projects/:projectId",
+        destination: `${backendUrl.origin}${basePath}/projects/:projectId`,
+      },
+      {
+        source: "/api/adforge/validate/preproduction",
+        destination: `${backendUrl.origin}${basePath}/validate/preproduction`,
+      },
+      {
+        source: "/api/adforge/validate/production-package",
+        destination: `${backendUrl.origin}${basePath}/validate/production-package`,
+      },
+      {
+        source: "/api/adforge/render/demo",
+        destination: `${backendUrl.origin}${basePath}/render/demo`,
+      },
+    ];
   },
   cacheComponents: true,
   partialPrefetching: true,
