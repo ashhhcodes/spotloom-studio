@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { createOwnedProject, getOwnedProject, listOwnedProjects } = await import(
+const { createOwnedProject, getOwnedProject, getOwnedProjectCreativeWorkspace, listOwnedProjects, saveOwnedProjectCreativeWorkspace } = await import(
   new URL("../src/app/projects/projects-api.ts", import.meta.url).href
 );
 
@@ -111,5 +111,68 @@ test("HTTP, network, and malformed response failures are sanitized", async () =>
   await assert.rejects(
     listOwnedProjects(async () => "token", async () => new Response(JSON.stringify([{ id: "missing-fields" }]), { status: 200 })),
     (error: unknown) => isProjectError(error, "invalid-response"),
+  );
+});
+
+function workspaceRecord(projectId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") {
+  return {
+    project_id: projectId,
+    revision: 0,
+    brief: {
+      campaign_name: "", brand_name: "", website_url: "", product_or_service: "",
+      target_audience: "", objective: null, platform: null, key_selling_points: [], call_to_action: "",
+    },
+    creative_direction: {
+      visual_style: "", advertising_tone: "", primary_message: "", supporting_message: "",
+      audience_emphasis: "", brand_personality: "", desired_video_format: null, preferred_duration_seconds: null,
+    },
+    storyboard: [],
+    created_at: null,
+    updated_at: null,
+  };
+}
+
+test("project creative workspace loads from the owner-scoped same-origin endpoint", async () => {
+  let url: RequestInfo | URL | undefined;
+  const result = await getOwnedProjectCreativeWorkspace("project-123", async () => "session-token", async (input: RequestInfo | URL) => {
+    url = input;
+    return new Response(JSON.stringify(workspaceRecord("project-123")), { status: 200 });
+  });
+  assert.equal(url, "/api/adforge/projects/project-123/creative-workspace");
+  assert.equal(result.revision, 0);
+  assert.deepEqual(result.storyboard, []);
+});
+
+test("workspace save sends only planning data and the expected revision", async () => {
+  let init: RequestInit | undefined;
+  const body = {
+    revision: 0,
+    brief: workspaceRecord().brief,
+    creative_direction: workspaceRecord().creative_direction,
+    storyboard: [{
+      id: "scene-opening", title: "Opening", description: "", visual_direction: "",
+      on_screen_text: "", narration: "", duration_seconds: 5, status: "draft" as const,
+    }],
+  };
+  const result = await saveOwnedProjectCreativeWorkspace("project-123", body, async () => "session-token", async (_input: RequestInfo | URL, options?: RequestInit) => {
+    init = options;
+    return new Response(JSON.stringify({ ...workspaceRecord("project-123"), ...body, revision: 1, created_at: "2026-11-11T10:00:00Z", updated_at: "2026-11-11T10:00:00Z" }), { status: 200 });
+  });
+  assert.equal(init?.method, "PUT");
+  assert.equal(new Headers(init?.headers).get("authorization"), "Bearer session-token");
+  assert.deepEqual(JSON.parse(String(init?.body)), body);
+  assert.equal("owner_user_id" in JSON.parse(String(init?.body)), false);
+  assert.equal(result.project_id, "project-123");
+  assert.equal(result.revision, 1);
+});
+
+test("workspace API rejects a mismatched project response and handles conflicts safely", async () => {
+  await assert.rejects(
+    getOwnedProjectCreativeWorkspace("expected-project", async () => "token", async () => new Response(JSON.stringify(workspaceRecord("other-project")), { status: 200 })),
+    (error: unknown) => isProjectError(error, "invalid-response"),
+  );
+  await assert.rejects(
+    getOwnedProjectCreativeWorkspace("project-123", async () => "token", async () => new Response("internal detail", { status: 409 })),
+    (error: unknown) => isProjectError(error, "conflict") && !error.message.includes("internal detail"),
   );
 });
