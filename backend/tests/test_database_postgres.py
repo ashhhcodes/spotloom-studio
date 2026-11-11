@@ -1,20 +1,33 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy import create_engine, event, inspect, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from adforge_renderer.database import DatabaseConfig
 from adforge_renderer.database.models import PROJECT_NAME_MAX_LENGTH, normalize_project_name
-from adforge_renderer.database.models import Base
+from adforge_renderer.database.models import (
+    Asset,
+    AssetUploadIntent,
+    Base,
+    Project,
+    ProjectAssetUsage,
+    User,
+)
 from adforge_renderer.identity import VerifiedClerkPrincipal
 from adforge_renderer.project_service import get_or_create_internal_user_id
+from adforge_renderer.asset_service import (
+    AssetQuotaExceeded,
+    AssetService,
+    AssetServiceConfig,
+)
 from sqlalchemy.orm import sessionmaker
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, local
@@ -491,6 +504,164 @@ def test_concurrent_first_identity_mapping_uses_unique_pair_on_disposable_postgr
         with factory() as session:
             assert session.scalar(text("SELECT count(*) FROM users")) == 1
             assert session.scalar(text("SELECT count(*) FROM external_identities")) == 1
+    finally:
+        if worker_engine is not None:
+            worker_engine.dispose()
+        with admin_engine.begin() as connection:
+            connection.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        admin_engine.dispose()
+
+
+def test_asset_upload_intent_quota_concurrency_on_disposable_spotloom_test() -> None:
+    """Verify per-project row locking serializes idempotency and quota races."""
+    try:
+        database_config = _local_disposable_test_config()
+    except ValueError as exc:
+        pytest.fail(str(exc))
+    if database_config is None:
+        pytest.skip("Set SPOTLOOM_TEST_DATABASE_URL to the disposable local spotloom_test database on port 5432.")
+
+    admin_engine = create_engine(database_config.url, hide_parameters=True, pool_pre_ping=True)
+    schema = f"spotloom_asset_service_{uuid4().hex}"
+    worker_engine = None
+    try:
+        with admin_engine.begin() as connection:
+            connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
+
+        backend_dir = Path(__file__).resolve().parents[1]
+        alembic_config = Config(str(backend_dir / "alembic.ini"))
+        with admin_engine.connect() as connection:
+            connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+            connection.commit()
+            alembic_config.attributes["connection"] = connection
+            command.upgrade(alembic_config, "head")
+            connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+            connection.commit()
+
+        worker_engine = create_engine(database_config.url, hide_parameters=True, pool_pre_ping=True)
+
+        @event.listens_for(worker_engine, "connect")
+        def _set_asset_schema(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute(f'SET search_path TO "{schema}"')
+            cursor.close()
+
+        factory = sessionmaker(bind=worker_engine, autoflush=False, expire_on_commit=False)
+        now = datetime.now(timezone.utc)
+        config = AssetServiceConfig(1000, timedelta(hours=1))
+        with factory.begin() as session:
+            user = User()
+            session.add(user)
+            session.flush()
+            project = Project(owner_user_id=user.id, name="Asset concurrency")
+            session.add(project)
+            session.flush()
+            owner_id, project_id = user.id, project.id
+            asset = AssetService(session, config).create_asset(
+                project_id=project_id, owner_user_id=owner_id, kind="audio"
+            )
+            assert asset is not None
+            asset_id = asset.id
+
+        start = Barrier(2)
+
+        def create_identical_intent(_index: int):
+            with factory.begin() as session:
+                start.wait(timeout=10)
+                return AssetService(
+                    session, config, clock=lambda: now
+                ).create_upload_intent(
+                    project_id=project_id,
+                    asset_id=asset_id,
+                    owner_user_id=owner_id,
+                    idempotency_key="same-request",
+                    reserved_bytes=300,
+                    lifetime=timedelta(minutes=30),
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            same_key_results = list(executor.map(create_identical_intent, range(2)))
+        assert same_key_results[0].intent.id == same_key_results[1].intent.id
+        assert sorted(result.created for result in same_key_results) == [False, True]
+
+        race_barrier = Barrier(2)
+
+        def reserve_race(key: str):
+            try:
+                with factory.begin() as session:
+                    race_barrier.wait(timeout=10)
+                    result = AssetService(
+                        session, config, clock=lambda: now
+                    ).create_upload_intent(
+                        project_id=project_id,
+                        asset_id=asset_id,
+                        owner_user_id=owner_id,
+                        idempotency_key=key,
+                        reserved_bytes=400,
+                        lifetime=timedelta(minutes=30),
+                    )
+                    return result is not None
+            except AssetQuotaExceeded:
+                return False
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            race_results = list(executor.map(reserve_race, ("race-a", "race-b")))
+        assert sorted(race_results) == [False, True]
+
+        with factory.begin() as session:
+            usage = session.get(ProjectAssetUsage, project_id)
+            assert usage is not None
+            assert (usage.used_bytes, usage.reserved_bytes) == (0, 700)
+            main_intent = session.scalar(
+                select(AssetUploadIntent).where(
+                    AssetUploadIntent.project_id == project_id,
+                    AssetUploadIntent.idempotency_key == "same-request",
+                )
+            )
+            service = AssetService(session, config, clock=lambda: now)
+            finalized = service.reconcile_finalized_upload(
+                project_id=project_id,
+                asset_id=asset_id,
+                intent_id=main_intent.id,
+                actual_bytes=250,
+            )
+            assert finalized.received_bytes == 250
+            assert (usage.used_bytes, usage.reserved_bytes) == (250, 400)
+            assert service.reconcile_finalized_upload(
+                project_id=project_id,
+                asset_id=asset_id,
+                intent_id=main_intent.id,
+                actual_bytes=250,
+            ) is finalized
+
+            expiring = session.scalar(
+                select(AssetUploadIntent).where(
+                    AssetUploadIntent.project_id == project_id,
+                    AssetUploadIntent.idempotency_key == "race-a",
+                )
+            ) or session.scalar(
+                select(AssetUploadIntent).where(
+                    AssetUploadIntent.project_id == project_id,
+                    AssetUploadIntent.idempotency_key == "race-b",
+                )
+            )
+            late_service = AssetService(
+                session,
+                config,
+                clock=lambda: expiring.expires_at + timedelta(seconds=1),
+            )
+            late_service.expire_upload_intent(
+                project_id=project_id, asset_id=asset_id, intent_id=expiring.id
+            )
+            assert usage.reserved_bytes == 400
+            late_service.release_reservation_after_cleanup(
+                project_id=project_id,
+                asset_id=asset_id,
+                intent_id=expiring.id,
+                cleanup_confirmed=True,
+            )
+            assert usage.reserved_bytes == 0
+            assert usage.used_bytes == 250
     finally:
         if worker_engine is not None:
             worker_engine.dispose()
