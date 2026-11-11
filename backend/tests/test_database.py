@@ -18,10 +18,17 @@ from adforge_renderer.database import (
     dispose_database_engine,
 )
 from adforge_renderer.database.models import (
+    Asset,
+    AssetEvidenceRevocation,
+    AssetUploadIntent,
+    AssetValidationAttempt,
+    AssetValidationEvidence,
+    AssetVersion,
     PROJECT_NAME_MAX_LENGTH,
     Base,
     ExternalIdentity,
     Project,
+    ProjectAssetUsage,
     User,
     normalize_project_name,
 )
@@ -114,7 +121,9 @@ def test_project_name_normalization_handles_unicode_whitespace() -> None:
 
 def test_initial_metadata_has_required_keys_constraints_and_indexes() -> None:
     assert set(Base.metadata.tables) == {
-        "users", "external_identities", "projects", "project_creative_workspaces"
+        "users", "external_identities", "projects", "project_creative_workspaces",
+        "project_asset_usage", "assets", "asset_upload_intents", "asset_versions",
+        "asset_validation_attempts", "asset_validation_evidence", "asset_evidence_revocations",
     }
 
     users = Base.metadata.tables[User.__tablename__]
@@ -164,8 +173,99 @@ def test_alembic_has_one_discoverable_initial_revision() -> None:
     config = Config(str(backend_dir / "alembic.ini"))
     scripts = ScriptDirectory.from_config(config)
 
-    assert scripts.get_current_head() == "20261111_0002"
-    revision = scripts.get_revision("20261111_0002")
+    assert scripts.get_current_head() == "20261112_0003_asset_persistence"
+    revision = scripts.get_revision("20261112_0003_asset_persistence")
     assert revision is not None
-    assert revision.down_revision == "20261101_0001"
-    assert "20261111_0002_project_creative_workspace.py" in revision.path
+    assert revision.down_revision == "20261111_0002"
+    assert "20261112_0003_asset_persistence.py" in revision.path
+
+
+def test_asset_metadata_has_project_scoped_immutable_history_constraints() -> None:
+    expected_tables = {
+        "project_asset_usage",
+        "assets",
+        "asset_upload_intents",
+        "asset_versions",
+        "asset_validation_attempts",
+        "asset_validation_evidence",
+        "asset_evidence_revocations",
+    }
+    assert expected_tables <= set(Base.metadata.tables)
+
+    usage = Base.metadata.tables[ProjectAssetUsage.__tablename__]
+    assets = Base.metadata.tables[Asset.__tablename__]
+    uploads = Base.metadata.tables[AssetUploadIntent.__tablename__]
+    versions = Base.metadata.tables[AssetVersion.__tablename__]
+    attempts = Base.metadata.tables[AssetValidationAttempt.__tablename__]
+    evidence = Base.metadata.tables[AssetValidationEvidence.__tablename__]
+    revocations = Base.metadata.tables[AssetEvidenceRevocation.__tablename__]
+
+    assert "quota_limit_bytes" in usage.c
+    assert usage.c.quota_limit_bytes.server_default is None
+    assert assets.c.current_ready_version_id.nullable
+    assert assets.c.deleted_at.nullable
+    assert uploads.c.idempotency_key.nullable is False
+    assert versions.c.object_version_reference.nullable is False
+    assert versions.c.finalized_at.nullable is False
+    assert versions.c.accepted_evidence_id.nullable
+    assert attempts.c.attempt_number.nullable is False
+    assert evidence.c.sha256_hex.nullable is False
+    assert evidence.c.validator_identity.nullable is False
+    assert revocations.c.evidence_id.primary_key
+
+    def composite_fk(table, local_columns, referred_table, remote_columns):
+        return any(
+            isinstance(constraint, ForeignKeyConstraint)
+            and [element.parent.name for element in constraint.elements] == local_columns
+            and [element.column.table.name for element in constraint.elements]
+            == [referred_table] * len(local_columns)
+            and [element.column.name for element in constraint.elements] == remote_columns
+            and all(element.ondelete == "RESTRICT" for element in constraint.elements)
+            for constraint in table.constraints
+        )
+
+    assert composite_fk(uploads, ["project_id", "asset_id"], "assets", ["project_id", "id"])
+    assert composite_fk(
+        versions, ["project_id", "asset_id", "upload_intent_id"], "asset_upload_intents",
+        ["project_id", "asset_id", "id"],
+    )
+    assert composite_fk(
+        attempts, ["project_id", "asset_id", "version_id"], "asset_versions",
+        ["project_id", "asset_id", "id"],
+    )
+    assert composite_fk(
+        evidence, ["project_id", "asset_id", "version_id", "attempt_id"], "asset_validation_attempts",
+        ["project_id", "asset_id", "version_id", "id"],
+    )
+    assert composite_fk(
+        evidence, ["project_id", "asset_id", "version_id"], "asset_versions",
+        ["project_id", "asset_id", "id"],
+    )
+    assert composite_fk(
+        versions, ["project_id", "asset_id", "id", "accepted_evidence_id"], "asset_validation_evidence",
+        ["project_id", "asset_id", "version_id", "id"],
+    )
+    assert composite_fk(
+        assets, ["project_id", "id", "current_ready_version_id"], "asset_versions",
+        ["project_id", "asset_id", "id"],
+    )
+
+    check_names = {
+        constraint.name
+        for table in (usage, assets, uploads, versions, attempts, evidence, revocations)
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert "ck_assets_kind_supported" in check_names
+    assert "ck_assets_ck_assets_kind_supported" not in check_names
+    assert {
+        "uq_asset_versions_storage_version",
+        "uq_asset_versions_upload_intent",
+    } <= {constraint.name for constraint in versions.constraints if isinstance(constraint, UniqueConstraint)}
+    assert any(index.unique and index.name == "uq_validation_attempts_one_active_per_version" for index in attempts.indexes)
+
+    # Every foreign key added for assets is restrictive; history has no CASCADE path.
+    for table in (usage, assets, uploads, versions, attempts, evidence, revocations):
+        for constraint in table.constraints:
+            if isinstance(constraint, ForeignKeyConstraint):
+                assert all(element.ondelete == "RESTRICT" for element in constraint.elements)

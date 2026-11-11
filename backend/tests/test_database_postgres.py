@@ -27,9 +27,28 @@ def _local_disposable_test_config() -> DatabaseConfig | None:
     config = DatabaseConfig.from_url(raw_url)
     if config.url.host not in {"localhost", "127.0.0.1", "::1"}:
         raise ValueError("PostgreSQL migration tests require a loopback database host.")
-    if not config.url.database or not config.url.database.endswith("_test"):
-        raise ValueError("PostgreSQL migration tests require a database ending in _test.")
+    if config.url.port != 5432:
+        raise ValueError("PostgreSQL migration tests require port 5432.")
+    if config.url.database != "spotloom_test":
+        raise ValueError("Destructive PostgreSQL integration tests require exactly spotloom_test.")
     return config
+
+
+def test_destructive_postgresql_guard_requires_exact_spotloom_test(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "SPOTLOOM_TEST_DATABASE_URL",
+        "postgresql+psycopg://test-user:test-password@localhost:5432/another_test",
+    )
+    with pytest.raises(ValueError, match="exactly spotloom_test"):
+        _local_disposable_test_config()
+
+    monkeypatch.setenv(
+        "SPOTLOOM_TEST_DATABASE_URL",
+        "postgresql+psycopg://test-user:test-password@localhost:5432/spotloom_test",
+    )
+    assert _local_disposable_test_config() is not None
 
 
 def _insert_project(connection, owner_id, name: str) -> None:
@@ -42,13 +61,13 @@ def _insert_project(connection, owner_id, name: str) -> None:
     )
 
 
-def test_initial_migration_upgrades_and_downgrades_disposable_local_postgresql() -> None:
+def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -> None:
     try:
         database_config = _local_disposable_test_config()
     except ValueError as exc:
         pytest.fail(str(exc))
     if database_config is None:
-        pytest.skip("Set SPOTLOOM_TEST_DATABASE_URL to an explicitly disposable local *_test database.")
+        pytest.skip("Set SPOTLOOM_TEST_DATABASE_URL to the disposable local spotloom_test database on port 5432.")
 
     backend_dir = Path(__file__).resolve().parents[1]
     config = Config(str(backend_dir / "alembic.ini"))
@@ -64,7 +83,7 @@ def test_initial_migration_upgrades_and_downgrades_disposable_local_postgresql()
             assert inspect(connection).get_table_names() == []
             config.attributes["connection"] = connection
 
-            command.upgrade(config, "head")
+            command.upgrade(config, "20261111_0002")
             assert set(inspect(connection).get_table_names()) == {
                 "alembic_version",
                 "users",
@@ -188,10 +207,224 @@ def test_initial_migration_upgrades_and_downgrades_disposable_local_postgresql()
             _insert_project(connection, owner_id, normalize_project_name(unicode_padded))
             connection.commit()
 
-            command.downgrade(config, "base")
-            # Alembic retains its version table after downgrade, with no revision rows.
-            assert set(inspect(connection).get_table_names()) == {"alembic_version"}
-            assert connection.scalar(text("SELECT count(*) FROM alembic_version")) == 0
+            prior_project_count = connection.scalar(text("SELECT count(*) FROM projects"))
+            prior_user_count = connection.scalar(text("SELECT count(*) FROM users"))
+            prior_workspace_count = connection.scalar(text("SELECT count(*) FROM project_creative_workspaces"))
+
+            command.upgrade(config, "head")
+            asset_tables = {
+                "project_asset_usage", "assets", "asset_upload_intents", "asset_versions",
+                "asset_validation_attempts", "asset_validation_evidence", "asset_evidence_revocations",
+            }
+            assert asset_tables <= set(inspect(connection).get_table_names())
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0003_asset_persistence"
+            assert all(
+                connection.scalar(text(f"SELECT count(*) FROM {table_name}")) == 0
+                for table_name in asset_tables
+            )
+            trigger_names = {
+                row[0]
+                for row in connection.execute(
+                    text("""SELECT tgname FROM pg_trigger
+                        WHERE NOT tgisinternal AND tgrelid IN (
+                            'asset_versions'::regclass, 'assets'::regclass,
+                            'asset_validation_attempts'::regclass, 'asset_validation_evidence'::regclass,
+                            'asset_evidence_revocations'::regclass
+                        )""")
+                )
+            }
+            assert trigger_names == {
+                "trg_asset_versions_immutable_identity",
+                "trg_assets_current_version_must_be_ready_insert",
+                "trg_assets_current_version_must_be_ready_update",
+                "trg_asset_versions_retain_current_ready",
+                "trg_asset_validation_attempts_immutable_identity",
+                "trg_asset_validation_evidence_exact_version",
+                "trg_asset_validation_evidence_immutable",
+                "trg_asset_evidence_revocation_blocks_readiness",
+            }
+
+            inspector = inspect(connection)
+            expected_composite_fks = {
+                ("asset_upload_intents", ("project_id", "asset_id"), "assets", ("project_id", "id")),
+                ("asset_versions", ("project_id", "asset_id"), "assets", ("project_id", "id")),
+                ("asset_versions", ("project_id", "asset_id", "upload_intent_id"), "asset_upload_intents", ("project_id", "asset_id", "id")),
+                ("asset_validation_attempts", ("project_id", "asset_id", "version_id"), "asset_versions", ("project_id", "asset_id", "id")),
+                ("asset_validation_evidence", ("project_id", "asset_id", "version_id", "attempt_id"), "asset_validation_attempts", ("project_id", "asset_id", "version_id", "id")),
+                ("asset_validation_evidence", ("project_id", "asset_id", "version_id"), "asset_versions", ("project_id", "asset_id", "id")),
+                ("asset_versions", ("project_id", "asset_id", "id", "accepted_evidence_id"), "asset_validation_evidence", ("project_id", "asset_id", "version_id", "id")),
+                ("assets", ("project_id", "id", "current_ready_version_id"), "asset_versions", ("project_id", "asset_id", "id")),
+            }
+            actual_composite_fks = set()
+            for table_name, local, remote_table, remote in expected_composite_fks:
+                for fk in inspector.get_foreign_keys(table_name):
+                    if tuple(fk["constrained_columns"]) == local:
+                        actual_composite_fks.add((table_name, local, fk["referred_table"], tuple(fk["referred_columns"])))
+            assert actual_composite_fks == expected_composite_fks
+            for table_name, local_columns, _remote_table, _remote_columns in expected_composite_fks:
+                fk = next(
+                    item for item in inspector.get_foreign_keys(table_name)
+                    if tuple(item["constrained_columns"]) == local_columns
+                )
+                assert fk["options"].get("ondelete") == "RESTRICT"
+
+            # The finalized identity trigger permits lifecycle changes but rejects rebinding.
+            asset_project_id, asset_id = uuid4(), uuid4()
+            upload_id, upload_id_2 = uuid4(), uuid4()
+            version_id, version_id_2 = uuid4(), uuid4()
+            connection.execute(
+                text("INSERT INTO projects (id, owner_user_id, name) VALUES (:id, :owner, 'Asset schema test')"),
+                {"id": asset_project_id, "owner": owner_id},
+            )
+            connection.execute(
+                text("INSERT INTO assets (id, project_id, kind) VALUES (:id, :project, 'audio')"),
+                {"id": asset_id, "project": asset_project_id},
+            )
+            connection.execute(
+                text("""INSERT INTO asset_upload_intents
+                    (id, project_id, asset_id, idempotency_key, request_fingerprint,
+                     staging_reference, reserved_bytes, expires_at)
+                    VALUES (:id, :project, :asset, 'key-1', :fingerprint,
+                            'opaque-staging-reference', 1024, CURRENT_TIMESTAMP + INTERVAL '1 hour')"""),
+                {"id": upload_id, "project": asset_project_id, "asset": asset_id, "fingerprint": "a" * 64},
+            )
+            connection.execute(
+                text("""INSERT INTO asset_versions
+                    (id, project_id, asset_id, upload_intent_id, storage_provider,
+                     object_version_reference, byte_size, detected_media_type, finalized_at)
+                    VALUES (:id, :project, :asset, :upload, 'local-dev', 'opaque-version-a',
+                            16, 'audio/wav', CURRENT_TIMESTAMP)"""),
+                {"id": version_id, "project": asset_project_id, "asset": asset_id, "upload": upload_id},
+            )
+            connection.execute(
+                text("""INSERT INTO asset_upload_intents
+                    (id, project_id, asset_id, idempotency_key, request_fingerprint,
+                     staging_reference, reserved_bytes, expires_at)
+                    VALUES (:id, :project, :asset, 'key-2', :fingerprint,
+                            'opaque-staging-reference-2', 1024, CURRENT_TIMESTAMP + INTERVAL '1 hour')"""),
+                {"id": upload_id_2, "project": asset_project_id, "asset": asset_id, "fingerprint": "b" * 64},
+            )
+            connection.execute(
+                text("""INSERT INTO asset_versions
+                    (id, project_id, asset_id, upload_intent_id, storage_provider,
+                     object_version_reference, byte_size, detected_media_type, finalized_at)
+                    VALUES (:id, :project, :asset, :upload, 'local-dev', 'opaque-version-second',
+                            16, 'audio/wav', CURRENT_TIMESTAMP)"""),
+                {"id": version_id_2, "project": asset_project_id, "asset": asset_id, "upload": upload_id_2},
+            )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        text("UPDATE asset_versions SET object_version_reference = 'opaque-version-b' WHERE id = :id"),
+                        {"id": version_id},
+                    )
+            attempt_id, attempt_id_2, evidence_id = uuid4(), uuid4(), uuid4()
+            for attempt_id_value, version_id_value, attempt_number in (
+                (attempt_id, version_id, 1), (attempt_id_2, version_id_2, 1)
+            ):
+                connection.execute(
+                    text("""INSERT INTO asset_validation_attempts
+                        (id, project_id, asset_id, version_id, attempt_number, state,
+                         profile_id, profile_version, validator_identity, validator_build, started_at, completed_at)
+                        VALUES (:id, :project, :asset, :version, :number, 'succeeded',
+                                'wav-narrow-v1', '1', 'test-validator', 'test-build', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"""),
+                    {
+                        "id": attempt_id_value, "project": asset_project_id, "asset": asset_id,
+                        "version": version_id_value, "number": attempt_number,
+                    },
+                )
+            connection.execute(
+                text("""INSERT INTO asset_validation_evidence
+                    (id, project_id, asset_id, version_id, attempt_id, storage_provider,
+                     object_version_reference, sha256_hex, observed_byte_count, profile_id,
+                     profile_version, validator_identity, validator_build, evidence_payload, validated_at)
+                    VALUES (:id, :project, :asset, :version, :attempt, 'local-dev',
+                            'opaque-version-a', :digest, 16, 'wav-narrow-v1', '1',
+                            'test-validator', 'test-build', CAST('{}' AS json), CURRENT_TIMESTAMP)"""),
+                {
+                    "id": evidence_id, "project": asset_project_id, "asset": asset_id,
+                    "version": version_id, "attempt": attempt_id, "digest": "a" * 64,
+                },
+            )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        text("""INSERT INTO asset_validation_evidence
+                            (id, project_id, asset_id, version_id, attempt_id, storage_provider,
+                             object_version_reference, sha256_hex, observed_byte_count, profile_id,
+                             profile_version, validator_identity, validator_build, evidence_payload, validated_at)
+                            VALUES (:id, :project, :asset, :version, :attempt, 'local-dev',
+                                    'opaque-version-second', :digest, 15, 'wav-narrow-v1', '1',
+                                    'test-validator', 'test-build', CAST('{}' AS json), CURRENT_TIMESTAMP)"""),
+                        {
+                            "id": uuid4(), "project": asset_project_id, "asset": asset_id,
+                            "version": version_id_2, "attempt": attempt_id_2, "digest": "b" * 64,
+                        },
+                    )
+            connection.execute(
+                text("UPDATE asset_versions SET current_attempt_id = :attempt, accepted_evidence_id = :evidence, validation_state = 'ready' WHERE id = :version"),
+                {"attempt": attempt_id, "evidence": evidence_id, "version": version_id},
+            )
+            connection.execute(
+                text("UPDATE assets SET current_ready_version_id = :version WHERE id = :asset"),
+                {"version": version_id, "asset": asset_id},
+            )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        text("UPDATE assets SET current_ready_version_id = :version WHERE id = :asset"),
+                        {"version": version_id_2, "asset": asset_id},
+                    )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        text("UPDATE asset_versions SET validation_state = 'rejected' WHERE id = :version"),
+                        {"version": version_id},
+                    )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        text("UPDATE asset_versions SET accepted_evidence_id = :evidence, validation_state = 'ready' WHERE id = :version"),
+                        {"evidence": evidence_id, "version": version_id_2},
+                    )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(text("DELETE FROM projects WHERE id = :id"), {"id": asset_project_id})
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(text("DELETE FROM asset_validation_evidence WHERE id = :id"), {"id": evidence_id})
+            connection.execute(
+                text("INSERT INTO asset_evidence_revocations (evidence_id, revoked_by, reason_code) VALUES (:id, 'test-service', 'test-revocation')"),
+                {"id": evidence_id},
+            )
+            assert connection.scalar(
+                text("SELECT current_ready_version_id FROM assets WHERE id = :id"), {"id": asset_id}
+            ) is None
+            assert connection.execute(
+                text("SELECT validation_state, accepted_evidence_id FROM asset_versions WHERE id = :id"),
+                {"id": version_id},
+            ).one() == ("revoked", None)
+
+            # Existing Milestone 11 rows survive the additive migration and its downgrade.
+            connection.commit()
+            command.downgrade(config, "20261111_0002")
+            assert not (asset_tables & set(inspect(connection).get_table_names()))
+            assert set(inspect(connection).get_table_names()) == {
+                "alembic_version", "users", "external_identities", "projects", "project_creative_workspaces"
+            }
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261111_0002"
+            assert connection.scalar(text("SELECT count(*) FROM projects")) == prior_project_count + 1
+            assert connection.scalar(text("SELECT count(*) FROM users")) == prior_user_count
+            assert connection.scalar(text("SELECT count(*) FROM project_creative_workspaces")) == prior_workspace_count
+            assert connection.scalar(
+                text("""SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE n.nspname = current_schema()
+                      AND p.proname IN ('spotloom_asset_version_identity_guard',
+                        'spotloom_asset_ready_pointer_guard', 'spotloom_retain_current_ready_version',
+                        'spotloom_asset_attempt_identity_guard', 'spotloom_asset_evidence_guard',
+                        'spotloom_asset_evidence_binding_guard', 'spotloom_asset_evidence_revocation_guard')""")
+            ) == 0
+            connection.commit()
     finally:
         config.attributes.pop("connection", None)
         with engine.begin() as connection:
@@ -209,7 +442,7 @@ def test_concurrent_first_identity_mapping_uses_unique_pair_on_disposable_postgr
     except ValueError as exc:
         pytest.fail(str(exc))
     if database_config is None:
-        pytest.skip("Set SPOTLOOM_TEST_DATABASE_URL to an explicitly disposable local *_test database.")
+        pytest.skip("Set SPOTLOOM_TEST_DATABASE_URL to the disposable local spotloom_test database on port 5432.")
 
     import adforge_renderer.project_service as project_service
 
