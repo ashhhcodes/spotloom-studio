@@ -177,7 +177,10 @@ def test_alembic_has_one_discoverable_initial_revision() -> None:
     config = Config(str(backend_dir / "alembic.ini"))
     scripts = ScriptDirectory.from_config(config)
 
-    assert scripts.get_current_head() == "20261112_0005_asset_recovery"
+    assert scripts.get_current_head() == "20261112_0006_asset_names"
+    names_revision = scripts.get_revision("20261112_0006_asset_names")
+    assert names_revision is not None
+    assert names_revision.down_revision == "20261112_0005_asset_recovery"
     recovery_revision = scripts.get_revision("20261112_0005_asset_recovery")
     assert recovery_revision is not None
     assert recovery_revision.down_revision == "20261112_0004_asset_upload_ops"

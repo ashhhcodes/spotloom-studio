@@ -8,8 +8,9 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, event, inspect, select, text
+from sqlalchemy import CheckConstraint, create_engine, event, inspect, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.sql.elements import conv
 
 from adforge_renderer.database import DatabaseConfig
 from adforge_renderer.database.models import PROJECT_NAME_MAX_LENGTH, normalize_project_name
@@ -277,7 +278,7 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                 "asset_validation_attempts", "asset_validation_evidence", "asset_evidence_revocations",
             }
             assert asset_tables <= set(inspect(connection).get_table_names())
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0005_asset_recovery"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0006_asset_names"
             assert all(
                 connection.scalar(text(f"SELECT count(*) FROM {table_name}")) == 0
                 for table_name in asset_tables
@@ -334,11 +335,24 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                 "ck_asset_upload_intents_storage_finalized_after_start",
                 "ck_asset_upload_intents_cleanup_confirmation_consistent",
             } <= upload_checks
+            for table_name in asset_tables:
+                expected_checks = {
+                    inspect(connection).dialect.identifier_preparer.truncate_and_render_constraint_name(
+                        conv(constraint.name), _alembic_quote=False
+                    )
+                    for constraint in Base.metadata.tables[table_name].constraints
+                    if isinstance(constraint, CheckConstraint)
+                }
+                actual_checks = {
+                    item["name"] for item in inspect(connection).get_check_constraints(table_name)
+                }
+                assert actual_checks == expected_checks
             claim_state_check = next(
                 item for item in inspect(connection).get_check_constraints("asset_upload_intents")
                 if item["name"] == "ck_asset_upload_intents_recovery_claim_state_consistent"
             )
-            assert "recovery_state = 'claimed'" in claim_state_check["sqltext"]
+            assert "recovery_state" in claim_state_check["sqltext"]
+            assert "'claimed'" in claim_state_check["sqltext"]
             assert "recovery_claim_token IS NOT NULL" in claim_state_check["sqltext"]
             trigger_names = {
                 row[0]
@@ -415,7 +429,7 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                      staging_reference, reserved_bytes, expires_at, recovery_deadline_at)
                     VALUES (:id, :project, :asset, 'key-1', :fingerprint,
                             'opaque-staging-reference', 1024, CURRENT_TIMESTAMP + INTERVAL '1 hour',
-                            CURRENT_TIMESTAMP + INTERVAL '20 hours')"""),
+                            CURRENT_TIMESTAMP + INTERVAL '25 hours')"""),
                 {"id": upload_id, "project": asset_project_id, "asset": asset_id, "fingerprint": "a" * 64},
             )
             _complete_upload_operation(
@@ -436,7 +450,7 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                      staging_reference, reserved_bytes, expires_at, recovery_deadline_at)
                     VALUES (:id, :project, :asset, 'key-2', :fingerprint,
                             'opaque-staging-reference-2', 1024, CURRENT_TIMESTAMP + INTERVAL '1 hour',
-                            CURRENT_TIMESTAMP + INTERVAL '20 hours')"""),
+                            CURRENT_TIMESTAMP + INTERVAL '25 hours')"""),
                 {"id": upload_id_2, "project": asset_project_id, "asset": asset_id, "fingerprint": "b" * 64},
             )
             _complete_upload_operation(
@@ -491,7 +505,7 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                             VALUES (:id, :project, :asset, 'key-duplicate-ref', :fingerprint,
                                     'opaque-staging-reference-duplicate', 1024,
                                     CURRENT_TIMESTAMP + INTERVAL '1 hour',
-                                    CURRENT_TIMESTAMP + INTERVAL '20 hours')"""),
+                                    CURRENT_TIMESTAMP + INTERVAL '25 hours')"""),
                         {"id": duplicate_intent, "project": asset_project_id, "asset": asset_id,
                          "fingerprint": "d" * 64},
                     )
@@ -509,7 +523,7 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                             VALUES (:id, :project, :asset, 'key-invalid-digest', :fingerprint,
                                     'opaque-staging-reference-invalid', 1024,
                                     CURRENT_TIMESTAMP + INTERVAL '1 hour',
-                                    CURRENT_TIMESTAMP + INTERVAL '20 hours')"""),
+                                    CURRENT_TIMESTAMP + INTERVAL '25 hours')"""),
                         {"id": invalid_digest_intent, "project": asset_project_id, "asset": asset_id,
                          "fingerprint": "e" * 64},
                     )
@@ -529,7 +543,7 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                             VALUES (:id, :project, :asset, 'key-unclaimed', :fingerprint,
                                     'opaque-staging-reference-unclaimed', 1024,
                                     CURRENT_TIMESTAMP + INTERVAL '1 hour',
-                                    CURRENT_TIMESTAMP + INTERVAL '20 hours')"""),
+                                    CURRENT_TIMESTAMP + INTERVAL '25 hours')"""),
                         {"id": unclaimed_intent, "project": asset_project_id, "asset": asset_id,
                          "fingerprint": "1" * 64},
                     )
@@ -548,7 +562,7 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                             VALUES (:id, :project, :asset, 'key-latest', :fingerprint,
                                     'opaque-staging-reference-latest', 1024,
                                     CURRENT_TIMESTAMP + INTERVAL '1 hour',
-                                    CURRENT_TIMESTAMP + INTERVAL '20 hours')"""),
+                                    CURRENT_TIMESTAMP + INTERVAL '25 hours')"""),
                         {"id": latest_intent, "project": asset_project_id, "asset": asset_id,
                          "fingerprint": "f" * 64},
                     )
@@ -578,7 +592,7 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                      staging_reference, reserved_bytes, expires_at, recovery_deadline_at)
                     VALUES (:id, :project, :asset, 'key-3', :fingerprint,
                             'opaque-staging-reference-3', 1024, CURRENT_TIMESTAMP + INTERVAL '1 hour',
-                            CURRENT_TIMESTAMP + INTERVAL '20 hours')"""),
+                            CURRENT_TIMESTAMP + INTERVAL '25 hours')"""),
                 {"id": upload_id_3, "project": asset_project_id, "asset": asset_id, "fingerprint": "c" * 64},
             )
             _complete_upload_operation(
@@ -911,6 +925,7 @@ def test_upload_recovery_migration_backfills_legacy_states_and_refuses_unsafe_do
             )
 
             receiving_id = insert_intent("recovery-receiving")
+            receiving_token = uuid4()
             connection.execute(
                 text("""UPDATE asset_upload_intents SET
                     operation_state = 'receiving', operation_revision = operation_revision + 1,
@@ -918,7 +933,7 @@ def test_upload_recovery_migration_backfills_legacy_states_and_refuses_unsafe_do
                     operation_claim_token = :token, operation_claimed_at = clock_timestamp() - INTERVAL '2 minutes',
                     operation_lease_expires_at = clock_timestamp() - INTERVAL '1 minute'
                     WHERE id = :id"""),
-                {"id": receiving_id, "token": uuid4()},
+                {"id": receiving_id, "token": receiving_token},
             )
             connection.execute(
                 text("UPDATE asset_upload_intents SET cleanup_state = 'pending', "
@@ -1021,7 +1036,7 @@ def test_upload_recovery_migration_backfills_legacy_states_and_refuses_unsafe_do
             command.upgrade(config, "head")
             connection.exec_driver_sql(f'SET search_path TO "{schema}"')
             connection.commit()
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0005_asset_recovery"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0006_asset_names"
             rows = {
                 row[0]: row[1:]
                 for row in connection.execute(text("""SELECT id, operation_state, recovery_state,
@@ -1031,7 +1046,9 @@ def test_upload_recovery_migration_backfills_legacy_states_and_refuses_unsafe_do
             assert rows[open_id] == ("open", "not_required", 0, 0, None, None, "not_required")
             assert rows[expired_id] == ("expired", "not_required", 0, 0, None, None, "not_required")
             assert rows[cancelled_id] == ("cancelled", "not_required", 0, 0, None, None, "not_required")
-            assert rows[receiving_id] == ("receiving", "not_required", 0, 0, None, None, "pending")
+            assert rows[receiving_id] == (
+                "receiving", "not_required", 0, 0, None, receiving_token, "pending"
+            )
             assert rows[uploaded_id] == ("uploaded", "pending", 0, 0, None, None, "not_required")
             assert rows[finalizing_id] == (
                 "finalizing", "claimed", 1, 2, old_finalizing_token, None, "not_required"
@@ -1054,7 +1071,7 @@ def test_upload_recovery_migration_backfills_legacy_states_and_refuses_unsafe_do
             connection.rollback()
             connection.exec_driver_sql(f'SET search_path TO "{schema}"')
             connection.commit()
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0005_asset_recovery"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0006_asset_names"
     finally:
         config.attributes.pop("connection", None)
         with engine.begin() as connection:
@@ -1370,23 +1387,35 @@ def test_recovery_lease_expiry_deadline_renewal_and_attempt_bounds_on_disposable
             connection.execute(
                 text("""INSERT INTO asset_upload_intents
                     (id, project_id, asset_id, idempotency_key, request_fingerprint,
-                     staging_reference, reserved_bytes, expires_at, recovery_deadline_at)
+                     staging_reference, reserved_bytes, created_at, expires_at, recovery_deadline_at)
                     VALUES (:id, :project, :asset, 'recovery-deadline-elapsed', :fingerprint,
-                            'deadline-staging', 100, clock_timestamp() - INTERVAL '1 hour',
-                            clock_timestamp() + INTERVAL '100 milliseconds')"""),
+                            'deadline-staging', 100, clock_timestamp() - INTERVAL '1 second',
+                            clock_timestamp() + INTERVAL '2 seconds',
+                            clock_timestamp() + INTERVAL '3 seconds')"""),
                 {"id": deadline_elapsed_id, "project": project_id,
                  "asset": asset_id, "fingerprint": "a" * 64},
             )
             connection.execute(
                 text("""UPDATE asset_upload_intents SET
+                    operation_state = 'receiving', operation_revision = operation_revision + 1,
+                    operation_claim_generation = operation_claim_generation + 1,
+                    operation_claim_token = :token, operation_claimed_at = clock_timestamp(),
+                    operation_lease_expires_at = expires_at - INTERVAL '100 milliseconds'
+                    WHERE id = :id"""),
+                {"id": deadline_elapsed_id, "token": uuid4()},
+            )
+            connection.execute(
+                text("""UPDATE asset_upload_intents SET
                     operation_state = 'uploaded', operation_revision = operation_revision + 1,
+                    operation_claim_token = NULL, operation_claimed_at = NULL,
+                    operation_lease_expires_at = NULL,
                     received_bytes = 16, observed_sha256_hex = :digest,
-                    transfer_completed_at = expires_at - INTERVAL '1 second',
+                    transfer_completed_at = clock_timestamp(),
                     recovery_state = 'pending', recovery_revision = recovery_revision + 1
                     WHERE id = :id"""),
                 {"id": deadline_elapsed_id, "digest": "b" * 64},
             )
-            connection.execute(text("SELECT pg_sleep(0.15)"))
+            connection.execute(text("SELECT pg_sleep(3.1)"))
             with pytest.raises(DBAPIError):
                 with connection.begin_nested():
                     connection.execute(

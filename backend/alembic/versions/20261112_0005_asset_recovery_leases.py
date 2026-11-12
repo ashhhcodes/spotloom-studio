@@ -81,6 +81,20 @@ def upgrade() -> None:
     for column in columns:
         op.add_column("asset_upload_intents", column)
 
+    # Drop the legacy claim check before any UPDATE. The table lock above is
+    # still held, and the check is replaced after the deterministic backfill.
+    op.drop_constraint(
+        "ck_asset_upload_intents_active_operation_claim_required",
+        "asset_upload_intents",
+        type_="check",
+    )
+
+    # Revision 0004 installed this deferred constraint trigger. Running it in
+    # immediate mode preserves its finalized-upload invariant while ensuring
+    # the backfill cannot leave pending trigger events that block later ALTERs.
+    # This is transaction-local and does not disable the trigger or commit.
+    op.execute("SET CONSTRAINTS trg_finalized_upload_has_version IMMEDIATE")
+
     # The deadline is deterministic for legacy rows. It is derived from the
     # immutable intent expiry; this is a data backfill, not a server default.
     op.execute(
@@ -92,11 +106,6 @@ def upgrade() -> None:
 
     # Materialize old operation states without fabricating transfer evidence.
     # Existing finalizing claims become recovery claim generation/attempt one.
-    op.drop_constraint(
-        "ck_asset_upload_intents_active_operation_claim_required",
-        "asset_upload_intents",
-        type_="check",
-    )
     op.execute(
         f"""
         UPDATE asset_upload_intents
@@ -445,6 +454,10 @@ def upgrade() -> None:
         "BEFORE INSERT OR UPDATE OR DELETE ON asset_upload_intents "
         "FOR EACH ROW EXECUTE FUNCTION spotloom_asset_upload_recovery_guard()"
     )
+
+    # Restore the trigger's normal deferred mode for any later statements in
+    # this transaction; the migration backfill itself has already been checked.
+    op.execute("SET CONSTRAINTS trg_finalized_upload_has_version DEFERRED")
 
 
 def downgrade() -> None:
