@@ -173,13 +173,60 @@ def test_alembic_has_one_discoverable_initial_revision() -> None:
     config = Config(str(backend_dir / "alembic.ini"))
     scripts = ScriptDirectory.from_config(config)
 
-    assert scripts.get_current_head() == "20261112_0003_asset_persistence"
-    revision = scripts.get_revision("20261112_0003_asset_persistence")
+    assert scripts.get_current_head() == "20261112_0004_asset_upload_ops"
+    revision = scripts.get_revision("20261112_0004_asset_upload_ops")
     assert revision is not None
-    assert revision.down_revision == "20261111_0002"
-    assert "20261112_0003_asset_persistence.py" in revision.path
+    assert revision.down_revision == "20261112_0003_asset_persistence"
+    previous_revision = scripts.get_revision("20261112_0003_asset_persistence")
+    assert previous_revision is not None
+    assert previous_revision.down_revision == "20261111_0002"
+    assert "20261112_0003_asset_persistence.py" in previous_revision.path
 
 
+def test_upload_operation_metadata_models_claims_observations_and_cleanup_separately() -> None:
+    uploads = Base.metadata.tables[AssetUploadIntent.__tablename__]
+    versions = Base.metadata.tables[AssetVersion.__tablename__]
+
+    required_columns = {
+        "operation_state", "operation_revision", "operation_updated_at",
+        "operation_claim_generation", "operation_claim_token", "operation_claimed_at",
+        "operation_lease_expires_at", "observed_sha256_hex", "transfer_completed_at",
+        "final_storage_provider", "final_object_version_reference", "finalization_started_at",
+        "storage_finalized_at", "cleanup_state", "cleanup_revision", "cleanup_updated_at",
+        "cleanup_claim_generation", "cleanup_claim_token", "cleanup_claimed_at",
+        "cleanup_lease_expires_at", "cleanup_confirmed_at",
+    }
+    assert required_columns <= set(uploads.c.keys())
+    assert uploads.c.operation_state.server_default is not None
+    assert uploads.c.operation_claim_token.nullable
+    assert uploads.c.observed_sha256_hex.nullable
+    assert uploads.c.final_object_version_reference.nullable
+    assert uploads.c.cleanup_confirmed_at.nullable
+    assert versions.c.detected_media_type.nullable
+
+    checks = {
+        constraint.name
+        for constraint in uploads.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert {
+        "ck_asset_upload_intents_operation_state_supported",
+        "ck_asset_upload_intents_operation_revision_nonnegative",
+        "ck_asset_upload_intents_operation_claim_lease_consistent",
+        "ck_asset_upload_intents_operation_lease_bounded",
+        "ck_asset_upload_intents_transfer_observation_consistent",
+        "ck_asset_upload_intents_completed_transfer_observed",
+        "ck_asset_upload_intents_final_reference_pair_consistent",
+        "ck_asset_upload_intents_storage_finalization_timestamp_consistent",
+        "ck_asset_upload_intents_storage_finalized_after_start",
+        "ck_asset_upload_intents_cleanup_state_supported",
+        "ck_asset_upload_intents_cleanup_confirmation_consistent",
+    } <= checks
+    assert {
+        "uq_upload_intents_final_storage_version",
+        "ix_upload_intents_expired_operation_lease",
+        "ix_upload_intents_pending_cleanup",
+    } <= {index.name for index in uploads.indexes}
 def test_asset_metadata_has_project_scoped_immutable_history_constraints() -> None:
     expected_tables = {
         "project_asset_usage",

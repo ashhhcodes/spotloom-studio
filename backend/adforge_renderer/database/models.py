@@ -192,7 +192,12 @@ class Asset(Base):
 
 
 class AssetUploadIntent(Base):
-    """Project-scoped idempotent reservation; no client metadata is trusted."""
+    """Project-scoped idempotent reservation and durable upload operation.
+
+    The server-generated intent UUID is also the operation identity; the
+    operation_state and cleanup_state fields fence storage work separately from
+    the legacy reservation-accounting state.
+    """
 
     __tablename__ = "asset_upload_intents"
     __table_args__ = (
@@ -202,7 +207,130 @@ class AssetUploadIntent(Base):
         CheckConstraint("received_bytes >= 0 AND received_bytes <= reserved_bytes", name="received_bytes_bounded"),
         CheckConstraint("state IN ('open', 'finalized', 'cancelled', 'expired', 'failed')", name="state_supported"),
         CheckConstraint("expires_at > created_at", name="expiry_after_creation"),
+        CheckConstraint(
+            "operation_state IN ('open', 'receiving', 'uploaded', 'finalizing', 'finalized', 'cancelled', 'expired', 'failed')",
+            name="operation_state_supported",
+        ),
+        CheckConstraint("operation_revision >= 0", name="operation_revision_nonnegative"),
+        CheckConstraint("operation_claim_generation >= 0", name="operation_claim_generation_nonnegative"),
+        CheckConstraint("cleanup_claim_generation >= 0", name="cleanup_claim_generation_nonnegative"),
+        CheckConstraint("cleanup_revision >= 0", name="cleanup_revision_nonnegative"),
+        CheckConstraint(
+            "cleanup_state IN ('not_required', 'pending', 'claimed', 'confirmed')",
+            name="cleanup_state_supported",
+        ),
+        CheckConstraint(
+            "(operation_claim_token IS NULL) = (operation_lease_expires_at IS NULL) AND "
+            "(operation_claim_token IS NULL) = (operation_claimed_at IS NULL)",
+            name="operation_claim_lease_consistent",
+        ),
+        CheckConstraint(
+            "operation_lease_expires_at IS NULL OR "
+            "(operation_lease_expires_at > operation_claimed_at AND operation_lease_expires_at <= expires_at)",
+            name="operation_lease_bounded",
+        ),
+        CheckConstraint(
+            "(operation_claim_token IS NULL) OR operation_claim_generation > 0",
+            name="operation_claim_generation_required",
+        ),
+        CheckConstraint(
+            "(cleanup_state = 'claimed') = (cleanup_claim_token IS NOT NULL)",
+            name="cleanup_claim_state_consistent",
+        ),
+        CheckConstraint(
+            "(cleanup_claim_token IS NULL) = (cleanup_lease_expires_at IS NULL) AND "
+            "(cleanup_claim_token IS NULL) = (cleanup_claimed_at IS NULL)",
+            name="cleanup_claim_lease_consistent",
+        ),
+        CheckConstraint(
+            "cleanup_lease_expires_at IS NULL OR cleanup_lease_expires_at > cleanup_claimed_at",
+            name="cleanup_lease_positive",
+        ),
+        CheckConstraint(
+            "(cleanup_claim_token IS NULL) OR cleanup_claim_generation > 0",
+            name="cleanup_claim_generation_required",
+        ),
+        CheckConstraint(
+            "(cleanup_state = 'confirmed') = (cleanup_confirmed_at IS NOT NULL)",
+            name="cleanup_confirmation_consistent",
+        ),
+        CheckConstraint(
+            "(operation_state IN ('receiving', 'finalizing')) = (operation_claim_token IS NOT NULL)",
+            name="active_operation_claim_required",
+        ),
+        CheckConstraint(
+            "(observed_sha256_hex IS NULL) = (transfer_completed_at IS NULL)",
+            name="transfer_observation_consistent",
+        ),
+        CheckConstraint(
+            "observed_sha256_hex IS NULL OR (length(observed_sha256_hex) = 64 AND observed_sha256_hex = lower(observed_sha256_hex))",
+            name="transfer_digest_shape",
+        ),
+        CheckConstraint(
+            "observed_sha256_hex IS NULL OR observed_sha256_hex ~ '^[0-9a-f]{64}$'",
+            name="transfer_digest_hex",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "operation_state NOT IN ('uploaded', 'finalizing', 'finalized') OR "
+            "(received_bytes > 0 AND observed_sha256_hex IS NOT NULL AND transfer_completed_at IS NOT NULL)",
+            name="completed_transfer_observed",
+        ),
+        CheckConstraint(
+            "(final_storage_provider IS NULL) = (final_object_version_reference IS NULL)",
+            name="final_reference_pair_consistent",
+        ),
+        CheckConstraint(
+            "operation_state NOT IN ('finalizing', 'finalized') OR "
+            "(final_storage_provider IS NOT NULL AND finalization_started_at IS NOT NULL)",
+            name="finalization_claim_has_reference",
+        ),
+        CheckConstraint(
+            "final_object_version_reference IS NULL OR "
+            "(length(btrim(final_storage_provider)) > 0 AND "
+            "length(btrim(final_object_version_reference)) > 0 AND "
+            "lower(btrim(final_object_version_reference)) != 'latest')",
+            name="final_reference_opaque_nonblank",
+        ),
+        CheckConstraint(
+            "finalization_started_at IS NULL OR transfer_completed_at IS NOT NULL AND "
+            "finalization_started_at >= transfer_completed_at",
+            name="finalization_after_transfer",
+        ),
+        CheckConstraint(
+            "(operation_state = 'finalized') = (storage_finalized_at IS NOT NULL)",
+            name="storage_finalization_timestamp_consistent",
+        ),
+        CheckConstraint(
+            "storage_finalized_at IS NULL OR storage_finalized_at >= finalization_started_at",
+            name="storage_finalized_after_start",
+        ),
+        CheckConstraint(
+            "cleanup_state != 'confirmed' OR operation_state NOT IN ('receiving', 'uploaded', 'finalizing')",
+            name="active_upload_not_cleaned",
+        ),
+        CheckConstraint(
+            "cleanup_state != 'claimed' OR operation_state NOT IN ('receiving', 'uploaded', 'finalizing')",
+            name="active_upload_cleanup_not_claimed",
+        ),
         Index("ix_upload_intents_project_state_expiry", "project_id", "state", "expires_at"),
+        Index(
+            "uq_upload_intents_final_storage_version",
+            "final_storage_provider", "final_object_version_reference", unique=True,
+            postgresql_where=text("final_object_version_reference IS NOT NULL"),
+            sqlite_where=text("final_object_version_reference IS NOT NULL"),
+        ),
+        Index(
+            "ix_upload_intents_expired_operation_lease",
+            "operation_state", "operation_lease_expires_at",
+            postgresql_where=text("operation_lease_expires_at IS NOT NULL"),
+            sqlite_where=text("operation_lease_expires_at IS NOT NULL"),
+        ),
+        Index(
+            "ix_upload_intents_pending_cleanup",
+            "cleanup_state", "cleanup_lease_expires_at",
+            postgresql_where=text("cleanup_state IN ('pending', 'claimed')"),
+            sqlite_where=text("cleanup_state IN ('pending', 'claimed')"),
+        ),
         ForeignKeyConstraint(
             ["project_id", "asset_id"], ["assets.project_id", "assets.id"],
             name="fk_upload_intents_project_asset_assets", ondelete="RESTRICT",
@@ -216,8 +344,41 @@ class AssetUploadIntent(Base):
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     staging_reference: Mapped[str] = mapped_column(Text, nullable=False)
     reserved_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Actual bytes observed by the server; paired with transfer_completed_at
+    # and observed_sha256_hex after a complete upload operation.
     received_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="open")
+    # The legacy `state` tracks reservation accounting. These fields separately
+    # fence durable storage operations and do not imply media validation.
+    operation_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="open"
+    )
+    operation_revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    operation_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    operation_claim_generation: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    operation_claim_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    operation_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    operation_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    observed_sha256_hex: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    transfer_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    final_storage_provider: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    final_object_version_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    finalization_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    storage_finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cleanup_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="not_required"
+    )
+    cleanup_revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    cleanup_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    cleanup_claim_generation: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    cleanup_claim_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    cleanup_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cleanup_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cleanup_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -269,7 +430,7 @@ class AssetVersion(Base):
     storage_provider: Mapped[str] = mapped_column(String(80), nullable=False)
     object_version_reference: Mapped[str] = mapped_column(Text, nullable=False)
     byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    detected_media_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    detected_media_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
     validation_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="quarantined")
     storage_state: Mapped[str] = mapped_column(String(24), nullable=False, server_default="present")
     current_attempt_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)

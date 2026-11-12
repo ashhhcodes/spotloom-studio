@@ -74,6 +74,47 @@ def _insert_project(connection, owner_id, name: str) -> None:
     )
 
 
+def _complete_upload_operation(connection, *, intent_id, object_reference, digest) -> None:
+    """Move a test intent through the persisted CAS lifecycle without app services."""
+    connection.execute(
+        text("""UPDATE asset_upload_intents SET
+            operation_state = 'receiving', operation_revision = operation_revision + 1,
+            operation_claim_generation = operation_claim_generation + 1,
+            operation_claim_token = :claim, operation_claimed_at = CURRENT_TIMESTAMP,
+            operation_lease_expires_at = expires_at - INTERVAL '1 minute'
+            WHERE id = :id"""),
+        {"id": intent_id, "claim": uuid4()},
+    )
+    connection.execute(
+        text("""UPDATE asset_upload_intents SET
+            operation_state = 'uploaded', operation_revision = operation_revision + 1,
+            operation_claim_token = NULL, operation_claimed_at = NULL,
+            operation_lease_expires_at = NULL, received_bytes = 16,
+            observed_sha256_hex = :digest, transfer_completed_at = CURRENT_TIMESTAMP
+            WHERE id = :id"""),
+        {"id": intent_id, "digest": digest},
+    )
+    connection.execute(
+        text("""UPDATE asset_upload_intents SET
+            operation_state = 'finalizing', operation_revision = operation_revision + 1,
+            operation_claim_generation = operation_claim_generation + 1,
+            operation_claim_token = :claim, operation_claimed_at = CURRENT_TIMESTAMP,
+            operation_lease_expires_at = expires_at - INTERVAL '1 minute',
+            final_storage_provider = 'local-dev', final_object_version_reference = :object_reference,
+            finalization_started_at = CURRENT_TIMESTAMP
+            WHERE id = :id"""),
+        {"id": intent_id, "claim": uuid4(), "object_reference": object_reference},
+    )
+    connection.execute(
+        text("""UPDATE asset_upload_intents SET
+            operation_state = 'finalized', operation_revision = operation_revision + 1,
+            operation_claim_token = NULL, operation_claimed_at = NULL,
+            operation_lease_expires_at = NULL, storage_finalized_at = CURRENT_TIMESTAMP
+            WHERE id = :id"""),
+        {"id": intent_id},
+    )
+
+
 def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -> None:
     try:
         database_config = _local_disposable_test_config()
@@ -230,17 +271,54 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                 "asset_validation_attempts", "asset_validation_evidence", "asset_evidence_revocations",
             }
             assert asset_tables <= set(inspect(connection).get_table_names())
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0003_asset_persistence"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0004_asset_upload_ops"
             assert all(
                 connection.scalar(text(f"SELECT count(*) FROM {table_name}")) == 0
                 for table_name in asset_tables
             )
+            upload_columns = {
+                column["name"]: column
+                for column in inspect(connection).get_columns("asset_upload_intents")
+            }
+            assert {
+                "operation_state", "operation_revision", "operation_claim_generation",
+                "operation_claim_token", "operation_claimed_at", "operation_lease_expires_at",
+                "observed_sha256_hex", "transfer_completed_at", "final_storage_provider",
+                "final_object_version_reference", "finalization_started_at", "storage_finalized_at",
+                "cleanup_state", "cleanup_revision", "cleanup_claim_generation",
+                "cleanup_claim_token", "cleanup_claimed_at", "cleanup_lease_expires_at",
+                "cleanup_confirmed_at",
+            } <= set(upload_columns)
+            assert inspect(connection).get_columns("asset_versions")[
+                next(index for index, column in enumerate(inspect(connection).get_columns("asset_versions")) if column["name"] == "detected_media_type")
+            ]["nullable"] is True
+            upload_indexes = {
+                item["name"] for item in inspect(connection).get_indexes("asset_upload_intents")
+            }
+            assert {
+                "uq_upload_intents_final_storage_version",
+                "ix_upload_intents_expired_operation_lease",
+                "ix_upload_intents_pending_cleanup",
+            } <= upload_indexes
+            upload_checks = {
+                item["name"] for item in inspect(connection).get_check_constraints("asset_upload_intents")
+            }
+            assert {
+                "ck_asset_upload_intents_operation_state_supported",
+                "ck_asset_upload_intents_operation_lease_bounded",
+                "ck_asset_upload_intents_transfer_digest_hex",
+                "ck_asset_upload_intents_completed_transfer_observed",
+                "ck_asset_upload_intents_finalization_after_transfer",
+                "ck_asset_upload_intents_storage_finalized_after_start",
+                "ck_asset_upload_intents_cleanup_confirmation_consistent",
+            } <= upload_checks
             trigger_names = {
                 row[0]
                 for row in connection.execute(
                     text("""SELECT tgname FROM pg_trigger
                         WHERE NOT tgisinternal AND tgrelid IN (
                             'asset_versions'::regclass, 'assets'::regclass,
+                            'asset_upload_intents'::regclass,
                             'asset_validation_attempts'::regclass, 'asset_validation_evidence'::regclass,
                             'asset_evidence_revocations'::regclass
                         )""")
@@ -251,6 +329,10 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                 "trg_assets_current_version_must_be_ready_insert",
                 "trg_assets_current_version_must_be_ready_update",
                 "trg_asset_versions_retain_current_ready",
+                "trg_asset_versions_detected_media_type_guard",
+                "trg_asset_upload_operation_guard",
+                "trg_asset_versions_upload_binding_guard",
+                "trg_finalized_upload_has_version",
                 "trg_asset_validation_attempts_immutable_identity",
                 "trg_asset_validation_evidence_exact_version",
                 "trg_asset_validation_evidence_immutable",
@@ -294,12 +376,21 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                 {"id": asset_id, "project": asset_project_id},
             )
             connection.execute(
+                text("INSERT INTO project_asset_usage (project_id, quota_limit_bytes, used_bytes, reserved_bytes) "
+                     "VALUES (:project, 100000, 16, 8)"),
+                {"project": asset_project_id},
+            )
+            connection.execute(
                 text("""INSERT INTO asset_upload_intents
                     (id, project_id, asset_id, idempotency_key, request_fingerprint,
                      staging_reference, reserved_bytes, expires_at)
                     VALUES (:id, :project, :asset, 'key-1', :fingerprint,
                             'opaque-staging-reference', 1024, CURRENT_TIMESTAMP + INTERVAL '1 hour')"""),
                 {"id": upload_id, "project": asset_project_id, "asset": asset_id, "fingerprint": "a" * 64},
+            )
+            _complete_upload_operation(
+                connection, intent_id=upload_id,
+                object_reference="opaque-version-a", digest="a" * 64,
             )
             connection.execute(
                 text("""INSERT INTO asset_versions
@@ -317,6 +408,10 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                             'opaque-staging-reference-2', 1024, CURRENT_TIMESTAMP + INTERVAL '1 hour')"""),
                 {"id": upload_id_2, "project": asset_project_id, "asset": asset_id, "fingerprint": "b" * 64},
             )
+            _complete_upload_operation(
+                connection, intent_id=upload_id_2,
+                object_reference="opaque-version-second", digest="b" * 64,
+            )
             connection.execute(
                 text("""INSERT INTO asset_versions
                     (id, project_id, asset_id, upload_intent_id, storage_provider,
@@ -325,6 +420,148 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                             16, 'audio/wav', CURRENT_TIMESTAMP)"""),
                 {"id": version_id_2, "project": asset_project_id, "asset": asset_id, "upload": upload_id_2},
             )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        text("UPDATE asset_upload_intents SET operation_state = 'open', "
+                             "operation_revision = operation_revision + 1 WHERE id = :id"),
+                        {"id": upload_id},
+                    )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        text("UPDATE asset_upload_intents SET operation_revision = -1 WHERE id = :id"),
+                        {"id": upload_id},
+                    )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        text("INSERT INTO asset_versions "
+                             "(id, project_id, asset_id, upload_intent_id, storage_provider, "
+                             "object_version_reference, byte_size, detected_media_type, finalized_at) "
+                             "VALUES (:id, :project, :asset, :upload, 'local-dev', 'wrong-reference', "
+                             "16, 'audio/wav', CURRENT_TIMESTAMP)"),
+                        {"id": uuid4(), "project": asset_project_id, "asset": asset_id, "upload": upload_id},
+                    )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        text("UPDATE asset_upload_intents SET cleanup_state = 'confirmed', "
+                             "cleanup_revision = cleanup_revision + 1 WHERE id = :id"),
+                        {"id": upload_id},
+                    )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    duplicate_intent = uuid4()
+                    connection.execute(
+                        text("""INSERT INTO asset_upload_intents
+                            (id, project_id, asset_id, idempotency_key, request_fingerprint,
+                             staging_reference, reserved_bytes, expires_at)
+                            VALUES (:id, :project, :asset, 'key-duplicate-ref', :fingerprint,
+                                    'opaque-staging-reference-duplicate', 1024,
+                                    CURRENT_TIMESTAMP + INTERVAL '1 hour')"""),
+                        {"id": duplicate_intent, "project": asset_project_id, "asset": asset_id,
+                         "fingerprint": "d" * 64},
+                    )
+                    _complete_upload_operation(
+                        connection, intent_id=duplicate_intent,
+                        object_reference="opaque-version-a", digest="d" * 64,
+                    )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    invalid_digest_intent = uuid4()
+                    connection.execute(
+                        text("""INSERT INTO asset_upload_intents
+                            (id, project_id, asset_id, idempotency_key, request_fingerprint,
+                             staging_reference, reserved_bytes, expires_at)
+                            VALUES (:id, :project, :asset, 'key-invalid-digest', :fingerprint,
+                                    'opaque-staging-reference-invalid', 1024,
+                                    CURRENT_TIMESTAMP + INTERVAL '1 hour')"""),
+                        {"id": invalid_digest_intent, "project": asset_project_id, "asset": asset_id,
+                         "fingerprint": "e" * 64},
+                    )
+                    connection.execute(
+                        text("UPDATE asset_upload_intents SET received_bytes = 1, "
+                             "observed_sha256_hex = :digest, transfer_completed_at = CURRENT_TIMESTAMP, "
+                             "operation_revision = operation_revision + 1 WHERE id = :id"),
+                        {"id": invalid_digest_intent, "digest": "z" * 64},
+                    )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    unclaimed_intent = uuid4()
+                    connection.execute(
+                        text("""INSERT INTO asset_upload_intents
+                            (id, project_id, asset_id, idempotency_key, request_fingerprint,
+                             staging_reference, reserved_bytes, expires_at)
+                            VALUES (:id, :project, :asset, 'key-unclaimed', :fingerprint,
+                                    'opaque-staging-reference-unclaimed', 1024,
+                                    CURRENT_TIMESTAMP + INTERVAL '1 hour')"""),
+                        {"id": unclaimed_intent, "project": asset_project_id, "asset": asset_id,
+                         "fingerprint": "1" * 64},
+                    )
+                    connection.execute(
+                        text("UPDATE asset_upload_intents SET operation_state = 'receiving', "
+                             "operation_revision = operation_revision + 1 WHERE id = :id"),
+                        {"id": unclaimed_intent},
+                    )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    latest_intent = uuid4()
+                    connection.execute(
+                        text("""INSERT INTO asset_upload_intents
+                            (id, project_id, asset_id, idempotency_key, request_fingerprint,
+                             staging_reference, reserved_bytes, expires_at)
+                            VALUES (:id, :project, :asset, 'key-latest', :fingerprint,
+                                    'opaque-staging-reference-latest', 1024,
+                                    CURRENT_TIMESTAMP + INTERVAL '1 hour')"""),
+                        {"id": latest_intent, "project": asset_project_id, "asset": asset_id,
+                         "fingerprint": "f" * 64},
+                    )
+                    _complete_upload_operation(
+                        connection, intent_id=latest_intent,
+                        object_reference="latest", digest="f" * 64,
+                    )
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        text("UPDATE asset_upload_intents SET cleanup_state = 'pending', "
+                             "cleanup_revision = cleanup_revision + 1 WHERE id = :id"),
+                        {"id": upload_id_2},
+                    )
+                    connection.execute(
+                        text("UPDATE asset_upload_intents SET cleanup_state = 'confirmed', "
+                             "cleanup_revision = cleanup_revision + 1 WHERE id = :id"),
+                        {"id": upload_id_2},
+                    )
+            # Upload finalization may persist a quarantined version without
+            # claiming that a media type has been detected.
+            null_type_savepoint = connection.begin_nested()
+            upload_id_3, version_id_3 = uuid4(), uuid4()
+            connection.execute(
+                text("""INSERT INTO asset_upload_intents
+                    (id, project_id, asset_id, idempotency_key, request_fingerprint,
+                     staging_reference, reserved_bytes, expires_at)
+                    VALUES (:id, :project, :asset, 'key-3', :fingerprint,
+                            'opaque-staging-reference-3', 1024, CURRENT_TIMESTAMP + INTERVAL '1 hour')"""),
+                {"id": upload_id_3, "project": asset_project_id, "asset": asset_id, "fingerprint": "c" * 64},
+            )
+            _complete_upload_operation(
+                connection, intent_id=upload_id_3,
+                object_reference="opaque-version-untyped", digest="c" * 64,
+            )
+            connection.execute(
+                text("""INSERT INTO asset_versions
+                    (id, project_id, asset_id, upload_intent_id, storage_provider,
+                     object_version_reference, byte_size, detected_media_type, finalized_at)
+                    VALUES (:id, :project, :asset, :upload, 'local-dev',
+                            'opaque-version-untyped', 16, NULL, CURRENT_TIMESTAMP)"""),
+                {"id": version_id_3, "project": asset_project_id, "asset": asset_id, "upload": upload_id_3},
+            )
+            assert connection.scalar(
+                text("SELECT detected_media_type FROM asset_versions WHERE id = :id"),
+                {"id": version_id_3},
+            ) is None
+            null_type_savepoint.rollback()
             with pytest.raises(IntegrityError):
                 with connection.begin_nested():
                     connection.execute(
@@ -420,6 +657,24 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
 
             # Existing Milestone 11 rows survive the additive migration and its downgrade.
             connection.commit()
+            # Downgrading only the new additive revision preserves the Gate 2A/B
+            # asset records, including the exact finalized upload/version binding.
+            command.downgrade(config, "20261112_0003_asset_persistence")
+            assert connection.scalar(text("SELECT count(*) FROM asset_upload_intents")) == 2
+            assert connection.scalar(text("SELECT count(*) FROM asset_versions")) == 2
+            assert connection.scalar(text("SELECT count(*) FROM asset_validation_evidence")) == 1
+            assert connection.scalar(text("SELECT count(*) FROM assets")) == 1
+            assert connection.execute(
+                text("SELECT quota_limit_bytes, used_bytes, reserved_bytes FROM project_asset_usage "
+                     "WHERE project_id = :project"),
+                {"project": asset_project_id},
+            ).one() == (100000, 16, 8)
+            assert "operation_state" not in {column["name"] for column in inspect(connection).get_columns("asset_upload_intents")}
+            assert inspect(connection).get_columns("asset_versions")[
+                next(index for index, column in enumerate(inspect(connection).get_columns("asset_versions")) if column["name"] == "detected_media_type")
+            ]["nullable"] is False
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0003_asset_persistence"
+
             command.downgrade(config, "20261111_0002")
             assert not (asset_tables & set(inspect(connection).get_table_names()))
             assert set(inspect(connection).get_table_names()) == {
@@ -433,11 +688,117 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                 text("""SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
                     WHERE n.nspname = current_schema()
                       AND p.proname IN ('spotloom_asset_version_identity_guard',
+                        'spotloom_asset_detected_media_type_guard', 'spotloom_asset_upload_operation_guard',
+                        'spotloom_asset_version_upload_binding_guard', 'spotloom_finalized_upload_has_version_guard',
                         'spotloom_asset_ready_pointer_guard', 'spotloom_retain_current_ready_version',
                         'spotloom_asset_attempt_identity_guard', 'spotloom_asset_evidence_guard',
                         'spotloom_asset_evidence_binding_guard', 'spotloom_asset_evidence_revocation_guard')""")
             ) == 0
             connection.commit()
+    finally:
+        config.attributes.pop("connection", None)
+        with engine.begin() as connection:
+            connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+            connection.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        engine.dispose()
+
+
+def test_durable_upload_operation_migration_preserves_gate2b_rows_on_disposable_postgresql() -> None:
+    """Upgrade/downgrade 0004 around existing Gate 2A/B asset records."""
+    try:
+        database_config = _local_disposable_test_config()
+    except ValueError as exc:
+        pytest.fail(str(exc))
+    if database_config is None:
+        pytest.skip("Set SPOTLOOM_TEST_DATABASE_URL to the disposable local spotloom_test database on port 5432.")
+
+    engine = create_engine(database_config.url, hide_parameters=True, pool_pre_ping=True)
+    schema = f"spotloom_upload_operation_migration_{uuid4().hex}"
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
+        with engine.connect() as connection:
+            connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+            connection.commit()
+            config.attributes["connection"] = connection
+            command.upgrade(config, "20261112_0003_asset_persistence")
+            connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+            connection.commit()
+
+            owner_id, project_id, asset_id, intent_id, version_id = (uuid4() for _ in range(5))
+            with connection.begin():
+                connection.execute(
+                    text("INSERT INTO users (id) VALUES (:id)"), {"id": owner_id}
+                )
+                _insert_project(connection, owner_id, "Pre-existing asset row")
+                project_id = connection.scalar(text("SELECT id FROM projects WHERE name = 'Pre-existing asset row'"))
+                connection.execute(
+                    text("INSERT INTO project_asset_usage "
+                         "(project_id, quota_limit_bytes, used_bytes, reserved_bytes) "
+                         "VALUES (:project, 9000, 123, 45)"),
+                    {"project": project_id},
+                )
+                connection.execute(
+                    text("INSERT INTO assets (id, project_id, kind) VALUES (:id, :project, 'audio')"),
+                    {"id": asset_id, "project": project_id},
+                )
+                connection.execute(
+                    text("""INSERT INTO asset_upload_intents
+                        (id, project_id, asset_id, idempotency_key, request_fingerprint,
+                         staging_reference, reserved_bytes, received_bytes, state, expires_at, finalized_at)
+                        VALUES (:id, :project, :asset, 'migration-preserved', :fingerprint,
+                                'opaque-existing-staging', 200, 123, 'finalized',
+                                CURRENT_TIMESTAMP + INTERVAL '1 hour', CURRENT_TIMESTAMP)"""),
+                    {"id": intent_id, "project": project_id, "asset": asset_id, "fingerprint": "a" * 64},
+                )
+                connection.execute(
+                    text("""INSERT INTO asset_versions
+                        (id, project_id, asset_id, upload_intent_id, storage_provider,
+                         object_version_reference, byte_size, detected_media_type, finalized_at)
+                        VALUES (:id, :project, :asset, :intent, 'local-dev', 'opaque-existing-version',
+                                123, 'audio/wav', CURRENT_TIMESTAMP)"""),
+                    {"id": version_id, "project": project_id, "asset": asset_id, "intent": intent_id},
+                )
+
+            command.upgrade(config, "20261112_0004_asset_upload_ops")
+            connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+            connection.commit()
+            assert connection.scalar(text("SELECT count(*) FROM asset_upload_intents")) == 1
+            assert connection.scalar(text("SELECT count(*) FROM asset_versions")) == 1
+            assert connection.execute(
+                text("SELECT state, received_bytes FROM asset_upload_intents WHERE id = :id"),
+                {"id": intent_id},
+            ).one() == ("finalized", 123)
+            assert connection.execute(
+                text("SELECT object_version_reference, byte_size, detected_media_type "
+                     "FROM asset_versions WHERE id = :id"),
+                {"id": version_id},
+            ).one() == ("opaque-existing-version", 123, "audio/wav")
+            assert connection.execute(
+                text("SELECT quota_limit_bytes, used_bytes, reserved_bytes "
+                     "FROM project_asset_usage WHERE project_id = :id"),
+                {"id": project_id},
+            ).one() == (9000, 123, 45)
+            assert connection.scalar(
+                text("SELECT operation_state FROM asset_upload_intents WHERE id = :id"),
+                {"id": intent_id},
+            ) == "open"  # Storage operation has not been proven by the old accounting state.
+
+            command.downgrade(config, "20261112_0003_asset_persistence")
+            connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+            connection.commit()
+            assert connection.scalar(text("SELECT count(*) FROM asset_upload_intents")) == 1
+            assert connection.scalar(text("SELECT count(*) FROM asset_versions")) == 1
+            assert connection.scalar(
+                text("SELECT count(*) FROM project_asset_usage WHERE project_id = :id "
+                     "AND quota_limit_bytes = 9000 AND used_bytes = 123 AND reserved_bytes = 45"),
+                {"id": project_id},
+            ) == 1
+            assert "operation_state" not in {
+                column["name"] for column in inspect(connection).get_columns("asset_upload_intents")
+            }
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0003_asset_persistence"
     finally:
         config.attributes.pop("connection", None)
         with engine.begin() as connection:
