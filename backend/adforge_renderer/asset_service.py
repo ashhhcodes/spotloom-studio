@@ -21,7 +21,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from adforge_renderer.asset_repository import AssetRepository
-from adforge_renderer.asset_storage_provider import PrivateAssetStorage, TemporaryObjectReference
+from adforge_renderer.asset_storage_provider import (
+    FinalizedObject,
+    PrivateAssetStorage,
+    TemporaryObjectReference,
+)
+from adforge_renderer.asset_recovery_repository import (
+    AssetRecoveryConflict,
+    AssetRecoveryRepository,
+    RecoveryFence,
+)
 from adforge_renderer.database.models import (
     Asset,
     AssetUploadIntent,
@@ -73,6 +82,15 @@ class AssetServiceConfig:
 @dataclass(frozen=True, slots=True)
 class UploadIntentResult:
     intent: AssetUploadIntent
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveredUploadCompletion:
+    """Atomic recovery completion outcome; never implies validation readiness."""
+
+    intent: AssetUploadIntent
+    version: AssetVersion
     created: bool
 
 
@@ -378,6 +396,131 @@ class AssetService:
         intent.state = "finalized"
         intent.finalized_at = self._now()
         return intent
+
+    def complete_recovered_upload(
+        self,
+        *,
+        project_id: UUID,
+        asset_id: UUID,
+        intent_id: UUID,
+        storage_provider: str,
+        finalized_object: FinalizedObject,
+        fence: RecoveryFence,
+    ) -> RecoveredUploadCompletion | None:
+        """Atomically persist a recovered immutable version and quota conversion.
+
+        The caller obtains ``finalized_object`` from trusted storage inspection
+        outside this transaction. This method only accepts the typed inspection
+        result, then compares it to persisted transfer and operation facts. It
+        performs no filesystem I/O and never commits the caller's transaction.
+        """
+        if type(finalized_object) is not FinalizedObject:
+            raise AssetOperationConflict("A verified private-storage result is required.")
+        if (
+            finalized_object.project_id != project_id
+            or finalized_object.operation_id != intent_id
+            or type(storage_provider) is not str
+            or not storage_provider.strip()
+        ):
+            raise AssetOperationConflict("Finalized storage provenance does not match the upload operation.")
+
+        # Global lock order: usage -> asset -> intent/version.
+        usage = self._lock_usage(project_id)
+        asset = self.session.scalar(
+            select(Asset).where(
+                Asset.project_id == project_id,
+                Asset.id == asset_id,
+            ).with_for_update()
+        )
+        if asset is None:
+            return None
+        intent = self.session.scalar(
+            select(AssetUploadIntent).where(
+                AssetUploadIntent.project_id == project_id,
+                AssetUploadIntent.asset_id == asset_id,
+                AssetUploadIntent.id == intent_id,
+            ).with_for_update()
+        )
+        if intent is None:
+            return None
+
+        version = self.session.scalar(
+            select(AssetVersion)
+            .where(AssetVersion.upload_intent_id == intent_id)
+            .with_for_update()
+        )
+        if intent.operation_state == "finalized" and intent.state == "finalized":
+            if (
+                version is None
+                or version.project_id != project_id
+                or version.asset_id != asset_id
+                or version.upload_intent_id != intent_id
+                or version.storage_provider != storage_provider.strip()
+                or version.object_version_reference != finalized_object.object_version.value
+                or version.byte_size != finalized_object.byte_size
+                or intent.final_storage_provider != storage_provider.strip()
+                or intent.final_object_version_reference != finalized_object.object_version.value
+                or intent.received_bytes != finalized_object.byte_size
+                or intent.observed_sha256_hex != finalized_object.sha256
+                or version.validation_state != "quarantined"
+                or usage.used_bytes < version.byte_size
+            ):
+                raise AssetOperationConflict("Previously completed upload state does not match verified storage.")
+            return RecoveredUploadCompletion(intent, version, False)
+
+        if (
+            intent.operation_state != "finalizing"
+            or intent.state not in {"open", "expired"}
+            or intent.final_storage_provider != storage_provider.strip()
+            or intent.final_object_version_reference != finalized_object.object_version.value
+            or intent.finalization_started_at is None
+            or intent.received_bytes <= 0
+            or intent.received_bytes > intent.reserved_bytes
+            or intent.observed_sha256_hex is None
+            or intent.transfer_completed_at is None
+            or intent.transfer_completed_at > intent.expires_at
+            or intent.received_bytes != finalized_object.byte_size
+            or intent.observed_sha256_hex != finalized_object.sha256
+            or finalized_object.byte_size <= 0
+        ):
+            raise AssetOperationConflict("Persisted transfer facts do not match the verified final object.")
+
+        if version is not None:
+            raise AssetOperationConflict("An uncompleted upload already has an immutable version record.")
+
+        repository = AssetRecoveryRepository(self.session)
+        # The savepoint contains the version, fenced state transition and quota
+        # conversion together; callers retain control of the outer transaction.
+        with self.session.begin_nested():
+            completed = repository.complete_finalization(intent_id, fence)
+            if completed is None:
+                raise AssetRecoveryConflict("The recovery claim is stale or no longer eligible.")
+            finalized_at = completed.storage_finalized_at
+            if not isinstance(finalized_at, datetime) or finalized_at.tzinfo is None:
+                raise AssetOperationConflict("Database finalization time is unavailable.")
+            version = AssetVersion(
+                project_id=project_id,
+                asset_id=asset_id,
+                upload_intent_id=intent_id,
+                storage_provider=storage_provider.strip(),
+                object_version_reference=finalized_object.object_version.value,
+                byte_size=finalized_object.byte_size,
+                detected_media_type=None,
+                validation_state="quarantined",
+                storage_state="present",
+                finalized_at=finalized_at,
+            )
+            self.session.add(version)
+            self.session.flush()
+            self._adjust_usage(
+                usage,
+                reserved=-intent.reserved_bytes,
+                used=intent.received_bytes,
+            )
+            completed.state = "finalized"
+            completed.finalized_at = completed.storage_finalized_at
+            self.session.flush()
+        return RecoveredUploadCompletion(completed, version, True)
 
     def release_reservation_after_cleanup(
         self, *, project_id: UUID, asset_id: UUID, intent_id: UUID, cleanup_confirmed: bool,

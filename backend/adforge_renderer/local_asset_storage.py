@@ -52,10 +52,12 @@ _TEMP_META = struct.Struct(">4sQQ32s")  # magic, limit, count, raw SHA-256
 _FINAL_META = struct.Struct(">4s16sQ32s")  # magic, originating temp UUID, count, digest
 _TEMP_BINDING_META = struct.Struct(">4s16s16s")  # magic, project UUID, operation UUID
 _FINAL_META_V2 = struct.Struct(">4s16s16s16sQ32s")  # magic, project, operation, temp UUID, count, digest
+_FINAL_META_V3 = struct.Struct(">4s16s16s16s16sQ32s")  # magic, exact version, project, operation, temp, count, digest
 _TEMP_MAGIC = b"SLT1"
 _FINAL_MAGIC = b"SLV1"
 _TEMP_BINDING_MAGIC = b"SLP1"
 _FINAL_MAGIC_V2 = b"SLV2"
+_FINAL_MAGIC_V3 = b"SLV3"
 _ROOT_MARKER = ".spotloom-private-storage-v1"
 _REPARSE_POINT = 0x400
 _PROTECTED_WEB_DIRS = {"public", "static", "www", "wwwroot", "htdocs", "httpdocs"}
@@ -619,6 +621,17 @@ class LocalPrivateAssetStorage:
             manifest = self._read_marker(manifest_path, _FINAL_META.size)
             magic, operation_id, count, expected_digest = _FINAL_META.unpack(manifest)
             project_id = None
+        elif manifest_info.st_size == _FINAL_META_V3.size:
+            manifest = self._read_marker(manifest_path, _FINAL_META_V3.size)
+            magic, version_id, project_id, operation_id, temp_id, count, expected_digest = _FINAL_META_V3.unpack(manifest)
+            if version_id != UUID(hex=key.removeprefix("ver_")).bytes:
+                raise StorageObjectIncomplete()
+            try:
+                temp_value = f"tmp_{UUID(bytes=temp_id).hex}"
+                if temp_value != self._bound_temporary_value(UUID(bytes=project_id), UUID(bytes=operation_id)):
+                    raise StorageObjectIncomplete()
+            except (ValueError, TypeError):
+                raise StorageObjectIncomplete() from None
         elif manifest_info.st_size == _FINAL_META_V2.size:
             manifest = self._read_marker(manifest_path, _FINAL_META_V2.size)
             magic, project_id, operation_id, temp_id, count, expected_digest = _FINAL_META_V2.unpack(manifest)
@@ -630,7 +643,11 @@ class LocalPrivateAssetStorage:
                 raise StorageObjectIncomplete() from None
         else:
             raise StorageObjectIncomplete()
-        expected_magic = _FINAL_MAGIC if project_id is None else _FINAL_MAGIC_V2
+        expected_magic = (
+            _FINAL_MAGIC if project_id is None
+            else _FINAL_MAGIC_V3 if manifest_info.st_size == _FINAL_META_V3.size
+            else _FINAL_MAGIC_V2
+        )
         if magic != expected_magic or object_info.st_size != count:
             raise StorageObjectIncomplete()
         with self._open_read(object_path) as stream:
@@ -652,6 +669,49 @@ class LocalPrivateAssetStorage:
         expected_sha256: str,
         expected_byte_size: int,
     ) -> FinalizedObject:
+        return self._finalize_temporary_object(
+            temporary,
+            object_version,
+            expected_sha256=expected_sha256,
+            expected_byte_size=expected_byte_size,
+            preserve_temporary=False,
+        )
+
+    def finalize_temporary_object_preserving_temporary(
+        self,
+        temporary: TemporaryObjectReference,
+        object_version: PrivateObjectVersionReference,
+        *,
+        expected_sha256: str,
+        expected_byte_size: int,
+    ) -> FinalizedObject:
+        """Create/verify the immutable object without deleting either object.
+
+        This recovery-only operation requires the project and operation-bound
+        temporary reference. The recovery manifest binds those identities, the
+        originating temporary ID, exact object reference, observed size and
+        digest. A repeated call after an ambiguous outcome safely verifies the
+        existing exact manifest and bytes.
+        """
+        if temporary.project_id is None or temporary.operation_id is None:
+            raise StorageInvalidReference()
+        return self._finalize_temporary_object(
+            temporary,
+            object_version,
+            expected_sha256=expected_sha256,
+            expected_byte_size=expected_byte_size,
+            preserve_temporary=True,
+        )
+
+    def _finalize_temporary_object(
+        self,
+        temporary: TemporaryObjectReference,
+        object_version: PrivateObjectVersionReference,
+        *,
+        expected_sha256: str,
+        expected_byte_size: int,
+        preserve_temporary: bool,
+    ) -> FinalizedObject:
         temp_key = self._validate_temporary(temporary)
         version_key, destination, manifest_path = self._final_paths(object_version)
         if (type(expected_sha256) is not str or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
@@ -668,9 +728,13 @@ class LocalPrivateAssetStorage:
             # cleanup. The persisted manifest proves this exact temp operation
             # and expected byte observation already finalized this reference.
             try:
-                observed, actual_operation_id, actual_project_id, _object, _manifest = self._inspect_final(object_version)
+                observed, actual_operation_id, actual_project_id, _object, existing_manifest_path = self._inspect_final(object_version)
             except StorageObjectMissing:
                 raise
+            if preserve_temporary:
+                manifest_info = self._lstat_regular(existing_manifest_path)
+                if manifest_info is None or manifest_info.st_size != _FINAL_META_V3.size:
+                    raise StorageObjectConflict() from None
             if (actual_operation_id != operation_id or actual_project_id != project_id
                     or observed.byte_size != expected_byte_size
                     or observed.sha256 != expected_sha256):
@@ -682,6 +746,7 @@ class LocalPrivateAssetStorage:
                 temporary_cleanup_confirmed=True,
                 project_id=temporary.project_id,
                 operation_id=temporary.operation_id,
+                temporary_preserved=False,
             )
         if not inspection.complete or inspection.sha256 is None:
             raise StorageObjectIncomplete()
@@ -692,7 +757,17 @@ class LocalPrivateAssetStorage:
             # them; current asset-version persistence also requires > 0 bytes.
             raise StorageObjectIncomplete()
 
-        if bound:
+        if bound and preserve_temporary:
+            manifest_data = _FINAL_META_V3.pack(
+                _FINAL_MAGIC_V3,
+                UUID(hex=version_key.removeprefix("ver_")).bytes,
+                project_id,
+                operation_id,
+                UUID(hex=temp_key.removeprefix("tmp_")).bytes,
+                inspection.byte_size,
+                bytes.fromhex(inspection.sha256),
+            )
+        elif bound:
             manifest_data = _FINAL_META_V2.pack(
                 _FINAL_MAGIC_V2, project_id, operation_id,
                 UUID(hex=temp_key.removeprefix("tmp_")).bytes,
@@ -749,11 +824,17 @@ class LocalPrivateAssetStorage:
                 or observed.byte_size != expected_byte_size
                 or observed.sha256 != expected_sha256):
             raise StorageObjectConflict()
-        cleanup_confirmed = True
-        try:
-            self.delete_temporary_object(temporary)
-        except (StorageCleanupNotConfirmed, StorageIOFailure, StorageInvalidReference):
-            cleanup_confirmed = False
+        if preserve_temporary:
+            manifest_info = self._lstat_regular(manifest_path)
+            if manifest_info is None or manifest_info.st_size != _FINAL_META_V3.size:
+                raise StorageObjectConflict()
+        cleanup_confirmed = False
+        if not preserve_temporary:
+            cleanup_confirmed = True
+            try:
+                self.delete_temporary_object(temporary)
+            except (StorageCleanupNotConfirmed, StorageIOFailure, StorageInvalidReference):
+                cleanup_confirmed = False
         return FinalizedObject(
             object_version=PrivateObjectVersionReference(value=version_key),
             byte_size=observed.byte_size,
@@ -761,6 +842,7 @@ class LocalPrivateAssetStorage:
             temporary_cleanup_confirmed=cleanup_confirmed,
             project_id=temporary.project_id,
             operation_id=temporary.operation_id,
+            temporary_preserved=preserve_temporary,
         )
 
     def open_exact_version(
@@ -778,6 +860,13 @@ class LocalPrivateAssetStorage:
             manifest = self._read_marker(manifest_path, _FINAL_META_V2.size)
             magic, _project, _operation, _temp, count, _digest = _FINAL_META_V2.unpack(manifest)
             valid_magic = magic == _FINAL_MAGIC_V2
+        elif manifest_info.st_size == _FINAL_META_V3.size:
+            manifest = self._read_marker(manifest_path, _FINAL_META_V3.size)
+            magic, version_id, _project, _operation, _temp, count, _digest = _FINAL_META_V3.unpack(manifest)
+            valid_magic = (
+                magic == _FINAL_MAGIC_V3
+                and version_id == UUID(hex=self._validate_version(object_version).removeprefix("ver_")).bytes
+            )
         else:
             raise StorageObjectIncomplete()
         if not valid_magic or object_info.st_size != count:

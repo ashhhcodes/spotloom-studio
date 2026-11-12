@@ -6,13 +6,17 @@ I/O, validation, quota accounting, commit, or rollback operations.
 
 from __future__ import annotations
 
+import random
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.orm import Session
 
+from adforge_renderer.asset_contract import PrivateObjectVersionReference
+from adforge_renderer.asset_recovery_policy import next_retry_time
 from adforge_renderer.database.models import (
     ASSET_RECOVERY_LEASE_RENEWAL_INTERVAL,
     ASSET_RECOVERY_MAX_LEASE,
@@ -65,6 +69,14 @@ class RecoveryClaim:
     attempt_count: int
     lease_expires_at: datetime
 
+    @property
+    def fence(self) -> RecoveryFence:
+        return RecoveryFence(
+            self.claim_token,
+            self.claim_generation,
+            self.recovery_revision,
+        )
+
     @classmethod
     def from_intent(cls, intent: AssetUploadIntent) -> RecoveryClaim:
         if (
@@ -83,13 +95,14 @@ class RecoveryClaim:
             lease_expires_at=intent.recovery_lease_expires_at,
         )
 
-    @property
-    def fence(self) -> RecoveryFence:
-        return RecoveryFence(
-            self.claim_token,
-            self.claim_generation,
-            self.recovery_revision,
-        )
+
+@dataclass(frozen=True, slots=True)
+class RetryOutcome:
+    """Persisted retry schedule or terminal recovery result."""
+
+    intent: AssetUploadIntent
+    next_retry_at: datetime | None
+    delay: timedelta | None
 
 
 class AssetRecoveryRepository:
@@ -101,10 +114,16 @@ class AssetRecoveryRepository:
     accepted for these security-sensitive comparisons.
     """
 
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        random_source: Callable[[float, float], float] | None = None,
+    ) -> None:
         if not isinstance(session, Session):
             raise TypeError("An active SQLAlchemy Session is required.")
         self.session = session
+        self._random_source = random_source or random.uniform
 
     def _require_postgresql(self) -> None:
         if self.session.get_bind().dialect.name != "postgresql":
@@ -218,11 +237,16 @@ class AssetRecoveryRepository:
                 AssetUploadIntent.recovery_lease_expires_at <= db_now,
             ),
         )
+        retry_due = or_(
+            AssetUploadIntent.next_retry_at.is_(None),
+            AssetUploadIntent.next_retry_at <= db_now,
+        )
         candidate_ids = list(
             self.session.scalars(
                 select(AssetUploadIntent.id)
                 .where(
                     eligible_claim_state,
+                    retry_due,
                     AssetUploadIntent.recovery_deadline_at > db_now,
                     AssetUploadIntent.recovery_attempt_count < ASSET_RECOVERY_MAX_ATTEMPTS,
                     AssetUploadIntent.recovery_claim_generation < _MAX_INTEGER,
@@ -268,6 +292,10 @@ class AssetRecoveryRepository:
                     AssetUploadIntent.recovery_claim_generation == previous_generation,
                     AssetUploadIntent.recovery_revision == previous_revision,
                     state_predicate,
+                    or_(
+                        AssetUploadIntent.next_retry_at.is_(None),
+                        AssetUploadIntent.next_retry_at <= func.clock_timestamp(),
+                    ),
                     AssetUploadIntent.recovery_deadline_at > func.clock_timestamp(),
                     AssetUploadIntent.recovery_attempt_count < ASSET_RECOVERY_MAX_ATTEMPTS,
                     AssetUploadIntent.recovery_claim_generation < _MAX_INTEGER,
@@ -286,6 +314,7 @@ class AssetRecoveryRepository:
                     ),
                     recovery_attempt_count=AssetUploadIntent.recovery_attempt_count + 1,
                     recovery_outcome_code=None,
+                    next_retry_at=None,
                 )
             )
             if changed is not None:
@@ -359,8 +388,185 @@ class AssetRecoveryRepository:
                 recovery_lease_issued_at=None,
                 recovery_lease_expires_at=None,
                 recovery_outcome_code=None,
+                next_retry_at=None,
             )
         )
+
+    def begin_finalization(
+        self,
+        intent_id: UUID,
+        fence: RecoveryFence,
+        *,
+        storage_provider: str,
+        object_version_reference: PrivateObjectVersionReference,
+    ) -> AssetUploadIntent | None:
+        """Persist finalization intent from the exact stored transfer observation.
+
+        Storage I/O happens before this short caller-owned transaction. This
+        method never accepts byte counts or digests from its caller.
+        """
+        self._require_postgresql()
+        if fence.expected_state != "claimed":
+            return None
+        if type(storage_provider) is not str or not storage_provider.strip() or len(storage_provider) > 80:
+            raise ValueError("A supported storage provider identifier is required.")
+        if type(object_version_reference) is not PrivateObjectVersionReference:
+            raise ValueError("An opaque immutable object-version reference is required.")
+        reference = object_version_reference.value
+        if type(reference) is not str or not reference.strip() or reference.strip().lower() == "latest":
+            raise ValueError("An exact immutable object-version reference is required.")
+        intent = self._lock_intent(intent_id)
+        if intent is None:
+            return None
+        db_now = func.clock_timestamp()
+        db_now_value = self.session.scalar(select(db_now))
+        if not isinstance(db_now_value, datetime) or db_now_value.tzinfo is None:
+            raise RuntimeError("PostgreSQL did not return a timezone-aware recovery clock.")
+        persisted_transfer_is_complete = (
+            AssetUploadIntent.received_bytes > 0,
+            AssetUploadIntent.observed_sha256_hex.is_not(None),
+            AssetUploadIntent.transfer_completed_at.is_not(None),
+            AssetUploadIntent.transfer_completed_at <= AssetUploadIntent.expires_at,
+        )
+        common = (
+            *self._fence_predicates(intent_id, fence),
+            AssetUploadIntent.recovery_lease_expires_at > db_now,
+            AssetUploadIntent.recovery_deadline_at > db_now,
+            *persisted_transfer_is_complete,
+        )
+        if (
+            intent.operation_state == "finalizing"
+            and intent.final_storage_provider == storage_provider
+            and intent.final_object_version_reference == reference
+            and intent.finalization_started_at is not None
+            and intent.recovery_state == fence.expected_state
+            and intent.recovery_claim_token == fence.claim_token
+            and intent.recovery_claim_generation == fence.claim_generation
+            and intent.recovery_revision == fence.recovery_revision
+            and intent.recovery_lease_expires_at is not None
+            and intent.recovery_lease_expires_at > db_now_value
+            and intent.recovery_deadline_at > db_now_value
+            and intent.received_bytes > 0
+            and intent.observed_sha256_hex is not None
+            and intent.transfer_completed_at is not None
+            and intent.transfer_completed_at <= intent.expires_at
+        ):
+            # Handles a lost response after the same fenced transition committed.
+            return intent
+        if intent.operation_state != "uploaded" or intent.finalization_started_at is not None:
+            return None
+        return self._update(
+            update(AssetUploadIntent)
+            .where(
+                *common,
+                AssetUploadIntent.operation_state == "uploaded",
+                AssetUploadIntent.final_storage_provider.is_(None),
+                AssetUploadIntent.final_object_version_reference.is_(None),
+                AssetUploadIntent.finalization_started_at.is_(None),
+            )
+            .values(
+                operation_state="finalizing",
+                operation_revision=AssetUploadIntent.operation_revision + 1,
+                final_storage_provider=storage_provider.strip(),
+                final_object_version_reference=reference,
+                finalization_started_at=db_now,
+            )
+        )
+
+    def record_retryable_failure(
+        self, intent_id: UUID, fence: RecoveryFence
+    ) -> RetryOutcome | None:
+        """Schedule a bounded full-jitter retry under the current live fence."""
+        self._require_postgresql()
+        if fence.expected_state != "claimed":
+            raise ValueError("Retry scheduling requires an active claimed recovery fence.")
+        intent = self._lock_intent(intent_id)
+        if intent is None:
+            return None
+        db_now_value = self.session.scalar(select(func.clock_timestamp()))
+        if not isinstance(db_now_value, datetime) or db_now_value.tzinfo is None:
+            raise RuntimeError("PostgreSQL did not return a timezone-aware recovery clock.")
+        if (
+            intent.recovery_state != "claimed"
+            or intent.recovery_claim_token != fence.claim_token
+            or intent.recovery_claim_generation != fence.claim_generation
+            or intent.recovery_revision != fence.recovery_revision
+            or intent.recovery_lease_expires_at is None
+            or intent.recovery_lease_expires_at <= db_now_value
+            or intent.recovery_deadline_at <= db_now_value
+        ):
+            return None
+        if intent.recovery_attempt_count >= ASSET_RECOVERY_MAX_ATTEMPTS:
+            changed = self._update(
+                update(AssetUploadIntent)
+                .where(
+                    *self._fence_predicates(intent_id, fence),
+                    AssetUploadIntent.recovery_lease_expires_at > func.clock_timestamp(),
+                    AssetUploadIntent.recovery_deadline_at > func.clock_timestamp(),
+                    AssetUploadIntent.recovery_attempt_count >= ASSET_RECOVERY_MAX_ATTEMPTS,
+                )
+                .values(
+                    recovery_state="exhausted",
+                    recovery_revision=fence.recovery_revision + 1,
+                    recovery_claim_token=None,
+                    recovery_claimed_at=None,
+                    recovery_lease_issued_at=None,
+                    recovery_lease_expires_at=None,
+                    recovery_outcome_code="attempts_exhausted",
+                    next_retry_at=None,
+                )
+            )
+            return RetryOutcome(changed, None, None) if changed is not None else None
+
+        retry_at = next_retry_time(
+            intent.recovery_attempt_count,
+            now=db_now_value,
+            random_source=self._random_source,
+        )
+        delay = retry_at - db_now_value.astimezone(timezone.utc)
+        if retry_at >= intent.recovery_deadline_at:
+            # No further automatic attempt can become eligible before the fixed
+            # deadline; preserve it and end this claim in manual reconciliation.
+            changed = self._update(
+                update(AssetUploadIntent)
+                .where(
+                    *self._fence_predicates(intent_id, fence),
+                    AssetUploadIntent.recovery_lease_expires_at > func.clock_timestamp(),
+                    AssetUploadIntent.recovery_deadline_at > func.clock_timestamp(),
+                )
+                .values(
+                    recovery_state="manual",
+                    recovery_revision=fence.recovery_revision + 1,
+                    recovery_claim_token=None,
+                    recovery_claimed_at=None,
+                    recovery_lease_issued_at=None,
+                    recovery_lease_expires_at=None,
+                    recovery_outcome_code="deadline_elapsed",
+                    next_retry_at=None,
+                )
+            )
+            return RetryOutcome(changed, None, None) if changed is not None else None
+
+        changed = self._update(
+            update(AssetUploadIntent)
+            .where(
+                *self._fence_predicates(intent_id, fence),
+                AssetUploadIntent.recovery_lease_expires_at > func.clock_timestamp(),
+                AssetUploadIntent.recovery_deadline_at > func.clock_timestamp(),
+                AssetUploadIntent.recovery_attempt_count < ASSET_RECOVERY_MAX_ATTEMPTS,
+            )
+            .values(
+                recovery_state="pending",
+                recovery_revision=fence.recovery_revision + 1,
+                recovery_claim_token=None,
+                recovery_claimed_at=None,
+                recovery_lease_issued_at=None,
+                recovery_lease_expires_at=None,
+                recovery_outcome_code=None,
+                next_retry_at=retry_at,
+            )
+        )
+        return RetryOutcome(changed, retry_at, delay) if changed is not None else None
 
     def requeue_expired_claim(self, intent_id: UUID, fence: RecoveryFence) -> AssetUploadIntent | None:
         """Return an expired claim to pending without extending its deadline."""
@@ -385,6 +591,7 @@ class AssetRecoveryRepository:
                 recovery_lease_issued_at=None,
                 recovery_lease_expires_at=None,
                 recovery_outcome_code=None,
+                next_retry_at=None,
             )
         )
 
@@ -412,6 +619,7 @@ class AssetRecoveryRepository:
                 recovery_lease_issued_at=None,
                 recovery_lease_expires_at=None,
                 recovery_outcome_code=outcome_code,
+                next_retry_at=None,
             )
         )
 
@@ -437,6 +645,7 @@ class AssetRecoveryRepository:
                 recovery_lease_issued_at=None,
                 recovery_lease_expires_at=None,
                 recovery_outcome_code="attempts_exhausted",
+                next_retry_at=None,
             )
         )
 
@@ -476,6 +685,7 @@ class AssetRecoveryRepository:
                 recovery_lease_issued_at=None,
                 recovery_lease_expires_at=None,
                 recovery_outcome_code="deadline_elapsed",
+                next_retry_at=None,
             )
         )
 
@@ -516,5 +726,6 @@ class AssetRecoveryRepository:
                 recovery_lease_issued_at=None,
                 recovery_lease_expires_at=None,
                 recovery_outcome_code="attempts_exhausted",
+                next_retry_at=None,
             )
         )

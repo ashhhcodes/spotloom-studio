@@ -286,7 +286,7 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                 "asset_validation_attempts", "asset_validation_evidence", "asset_evidence_revocations",
             }
             assert asset_tables <= set(inspect(connection).get_table_names())
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0006_asset_names"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0007_asset_retry"
             assert all(
                 connection.scalar(text(f"SELECT count(*) FROM {table_name}")) == 0
                 for table_name in asset_tables
@@ -302,6 +302,7 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                 "recovery_claim_generation", "recovery_claim_token", "recovery_claimed_at",
                 "recovery_lease_issued_at", "recovery_lease_expires_at", "recovery_attempt_count",
                 "recovery_finished_at", "recovery_outcome_code",
+                "next_retry_at",
                 "observed_sha256_hex", "transfer_completed_at", "final_storage_provider",
                 "final_object_version_reference", "finalization_started_at", "storage_finalized_at",
                 "cleanup_state", "cleanup_revision", "cleanup_claim_generation",
@@ -326,6 +327,13 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                 "ix_upload_intents_recovery_due",
                 "ix_upload_intents_expired_recovery_lease",
             } <= upload_indexes
+            recovery_due_index = next(
+                item for item in inspect(connection).get_indexes("asset_upload_intents")
+                if item["name"] == "ix_upload_intents_recovery_due"
+            )
+            assert recovery_due_index["column_names"] == [
+                "recovery_state", "next_retry_at", "recovery_deadline_at"
+            ]
             upload_checks = {
                 item["name"] for item in inspect(connection).get_check_constraints("asset_upload_intents")
             }
@@ -342,6 +350,7 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                 "ck_asset_upload_intents_finalization_after_transfer",
                 "ck_asset_upload_intents_storage_finalized_after_start",
                 "ck_asset_upload_intents_cleanup_confirmation_consistent",
+                "ck_asset_upload_intents_next_retry_pending_before_deadline",
             } <= upload_checks
             for table_name in asset_tables:
                 expected_checks = {
@@ -1044,7 +1053,7 @@ def test_upload_recovery_migration_backfills_legacy_states_and_refuses_unsafe_do
             command.upgrade(config, "head")
             connection.exec_driver_sql(f'SET search_path TO "{schema}"')
             connection.commit()
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0006_asset_names"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0007_asset_retry"
             rows = {
                 row[0]: row[1:]
                 for row in connection.execute(text("""SELECT id, operation_state, recovery_state,
@@ -1079,7 +1088,7 @@ def test_upload_recovery_migration_backfills_legacy_states_and_refuses_unsafe_do
             connection.rollback()
             connection.exec_driver_sql(f'SET search_path TO "{schema}"')
             connection.commit()
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0006_asset_names"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0007_asset_retry"
     finally:
         config.attributes.pop("connection", None)
         with engine.begin() as connection:

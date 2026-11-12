@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from threading import Barrier
@@ -19,11 +20,20 @@ from sqlalchemy.orm import Session
 
 import adforge_renderer.asset_recovery_repository as recovery_repository
 from adforge_renderer.asset_recovery_repository import (
+    AssetRecoveryConflict,
     AssetRecoveryRepository,
     RecoveryFence,
 )
 from adforge_renderer.database import DatabaseConfig
-from adforge_renderer.database.models import ASSET_RECOVERY_MAX_ATTEMPTS, AssetUploadIntent
+from adforge_renderer.database.models import (
+    ASSET_RECOVERY_MAX_ATTEMPTS,
+    Asset,
+    AssetUploadIntent,
+    AssetVersion,
+)
+from adforge_renderer.asset_contract import PrivateObjectVersionReference
+from adforge_renderer.asset_service import AssetOperationConflict, AssetService, AssetServiceConfig
+from adforge_renderer.local_asset_storage import LocalAssetStorageConfig, LocalPrivateAssetStorage
 
 
 def test_recovery_fence_requires_complete_supported_values() -> None:
@@ -375,7 +385,9 @@ def test_recovery_claim_renew_reclaim_and_retry_fencing_on_disposable_postgresql
             )
             for stale_fence in stale_exhaustion_fences:
                 assert repository.mark_attempts_exhausted(exhaustion_id, stale_fence) is None
-            exhausted = repository.mark_attempts_exhausted(exhaustion_id, latest.fence)
+            retry_result = repository.record_retryable_failure(exhaustion_id, latest.fence)
+            assert retry_result is not None
+            exhausted = retry_result.intent
             assert exhausted is not None and exhausted.recovery_state == "exhausted"
             assert exhausted.recovery_outcome_code == "attempts_exhausted"
             other_claim = repository.claim_next()
@@ -584,6 +596,375 @@ def test_concurrent_recovery_repository_claim_has_one_winner_on_disposable_postg
             assert row is not None
             assert (row.recovery_claim_generation, row.recovery_attempt_count) == (1, 1)
             assert row.recovery_claim_token == winners[0].claim_token
+    finally:
+        if config is not None and connection is not None:
+            _cleanup_schema(engine, schema, config, connection)
+        else:
+            engine.dispose()
+
+
+def test_retry_schedule_is_persisted_and_due_time_is_checked_atomically_on_postgresql() -> None:
+    engine, schema = _test_engine_and_schema("retry-eligibility")
+    config = None
+    connection = None
+    try:
+        config, connection = _prepare_schema(engine, schema)
+        _project, _asset, intent_id, _owner = _seed_pending_intent(connection, "retry-eligible")
+        connection.commit()
+
+        with Session(connection, autoflush=False, expire_on_commit=False) as session:
+            repository = AssetRecoveryRepository(session, random_source=lambda _low, high: high)
+            first = repository.claim_next()
+            assert first is not None and first.intent_id == intent_id
+            stale_fences = (
+                RecoveryFence(uuid4(), first.claim_generation, first.recovery_revision),
+                RecoveryFence(first.claim_token, first.claim_generation + 1, first.recovery_revision),
+                RecoveryFence(first.claim_token, first.claim_generation, first.recovery_revision + 1),
+            )
+            for stale in stale_fences:
+                assert repository.record_retryable_failure(intent_id, stale) is None
+            with pytest.raises(ValueError, match="active claimed"):
+                repository.record_retryable_failure(
+                    intent_id,
+                    RecoveryFence(
+                        first.claim_token,
+                        first.claim_generation,
+                        first.recovery_revision,
+                        "pending",
+                    ),
+                )
+            outcome = repository.record_retryable_failure(intent_id, first.fence)
+            assert outcome is not None
+            assert outcome.intent.recovery_state == "pending"
+            assert outcome.next_retry_at is not None
+            assert outcome.delay == timedelta(seconds=5)
+            persisted = session.scalar(
+                select(AssetUploadIntent.next_retry_at).where(AssetUploadIntent.id == intent_id)
+            )
+            assert persisted == outcome.next_retry_at
+            session.commit()
+
+        # A fresh Session cannot claim before the persisted retry time.
+        with Session(connection, autoflush=False, expire_on_commit=False) as session:
+            assert AssetRecoveryRepository(session).claim_next() is None
+            session.commit()
+
+        # Move only the test row's eligibility timestamp to the past using the
+        # database clock; this avoids sleeping and tests the due-boundary CAS.
+        connection.execute(
+            text("UPDATE asset_upload_intents SET next_retry_at = clock_timestamp() - INTERVAL '1 second', "
+                 "recovery_revision = recovery_revision + 1 WHERE id = :id"),
+            {"id": intent_id},
+        )
+        connection.commit()
+        with Session(connection, autoflush=False, expire_on_commit=False) as session:
+            second = AssetRecoveryRepository(session).claim_next()
+            assert second is not None and second.intent_id == intent_id
+            assert second.attempt_count == 2
+            assert session.scalar(
+                select(AssetUploadIntent.next_retry_at).where(AssetUploadIntent.id == intent_id)
+            ) is None
+            session.commit()
+    finally:
+        if config is not None and connection is not None:
+            _cleanup_schema(engine, schema, config, connection)
+        else:
+            engine.dispose()
+
+
+def test_fenced_begin_finalization_uses_persisted_transfer_and_is_idempotent() -> None:
+    engine, schema = _test_engine_and_schema("begin-finalization")
+    config = None
+    connection = None
+    try:
+        config, connection = _prepare_schema(engine, schema)
+        _project, _asset, intent_id, _owner = _seed_pending_intent(connection, "begin-finalization")
+        connection.commit()
+        reference = PrivateObjectVersionReference(value="ver_begin-finalization-v1")
+
+        with Session(connection, autoflush=False, expire_on_commit=False) as session:
+            repository = AssetRecoveryRepository(session)
+            claim = repository.claim_next(lease_duration=timedelta(milliseconds=100))
+            assert claim is not None and claim.intent_id == intent_id
+            stale_fences = (
+                RecoveryFence(uuid4(), claim.claim_generation, claim.recovery_revision),
+                RecoveryFence(claim.claim_token, claim.claim_generation + 1, claim.recovery_revision),
+                RecoveryFence(claim.claim_token, claim.claim_generation, claim.recovery_revision + 1),
+                RecoveryFence(claim.claim_token, claim.claim_generation, claim.recovery_revision, "pending"),
+            )
+            for stale in stale_fences:
+                assert repository.begin_finalization(
+                    intent_id, stale, storage_provider="local-private", object_version_reference=reference
+                ) is None
+            session.commit()
+
+        # A claim whose lease expired cannot begin finalization. A replacement
+        # claim advances generation/revision and fences the stale worker.
+        time.sleep(0.15)
+        with Session(connection, autoflush=False, expire_on_commit=False) as session:
+            repository = AssetRecoveryRepository(session)
+            assert repository.begin_finalization(
+                intent_id, claim.fence, storage_provider="local-private", object_version_reference=reference
+            ) is None
+            reclaimed = repository.claim_next()
+            assert reclaimed is not None and reclaimed.intent_id == intent_id
+            assert reclaimed.claim_generation == claim.claim_generation + 1
+            assert repository.begin_finalization(
+                intent_id, claim.fence, storage_provider="local-private", object_version_reference=reference
+            ) is None
+            started = repository.begin_finalization(
+                intent_id, reclaimed.fence,
+                storage_provider="local-private", object_version_reference=reference
+            )
+            assert started is not None
+            assert started.operation_state == "finalizing"
+            assert started.final_storage_provider == "local-private"
+            assert started.final_object_version_reference == reference.value
+            assert started.finalization_started_at >= started.transfer_completed_at
+            repeated = repository.begin_finalization(
+                intent_id, reclaimed.fence,
+                storage_provider="local-private", object_version_reference=reference
+            )
+            assert repeated is not None and repeated.finalization_started_at == started.finalization_started_at
+            session.commit()
+    finally:
+        if config is not None and connection is not None:
+            _cleanup_schema(engine, schema, config, connection)
+        else:
+            engine.dispose()
+
+
+def test_recovered_upload_completion_is_atomic_idempotent_and_keeps_asset_quarantined(
+    tmp_path: Path,
+) -> None:
+    engine, schema = _test_engine_and_schema("service-completion")
+    config = None
+    connection = None
+    storage = LocalPrivateAssetStorage(LocalAssetStorageConfig(tmp_path / "private-assets"))
+    try:
+        config, connection = _prepare_schema(engine, schema)
+        owner_id, project_id, asset_id, intent_id = (uuid4() for _ in range(4))
+        connection.execute(text("INSERT INTO users (id) VALUES (:id)"), {"id": owner_id})
+        connection.execute(
+            text("INSERT INTO projects (id, owner_user_id, name) VALUES (:id, :owner, 'Recovery service')"),
+            {"id": project_id, "owner": owner_id},
+        )
+        connection.execute(
+            text("INSERT INTO project_asset_usage (project_id, quota_limit_bytes, reserved_bytes) "
+                 "VALUES (:project, 100000, 100)"),
+            {"project": project_id},
+        )
+        connection.execute(
+            text("INSERT INTO assets (id, project_id, kind) VALUES (:id, :project, 'audio')"),
+            {"id": asset_id, "project": project_id},
+        )
+        temporary = storage.allocate_temporary_reference(project_id=project_id, operation_id=intent_id)
+        storage.create_temporary_object(temporary)
+        payload = b"persisted storage facts drive recovered completion"
+        observed = storage.write_temporary_object(temporary, [payload], max_bytes=1024)
+        connection.execute(
+            text("""INSERT INTO asset_upload_intents
+                (id, project_id, asset_id, idempotency_key, request_fingerprint,
+                 staging_reference, reserved_bytes, created_at, expires_at, recovery_deadline_at)
+                VALUES (:id, :project, :asset, 'service-completion', :fingerprint,
+                        :staging, 100, clock_timestamp() - INTERVAL '1 second',
+                        clock_timestamp() + INTERVAL '2 seconds',
+                        clock_timestamp() + INTERVAL '24 hours')"""),
+            {"id": intent_id, "project": project_id, "asset": asset_id,
+             "fingerprint": "e" * 64, "staging": temporary.value},
+        )
+        transfer_token = uuid4()
+        connection.execute(
+            text("""UPDATE asset_upload_intents SET operation_state = 'receiving',
+                operation_revision = operation_revision + 1,
+                operation_claim_generation = operation_claim_generation + 1,
+                operation_claim_token = :token, operation_claimed_at = clock_timestamp(),
+                operation_lease_expires_at = expires_at - INTERVAL '100 milliseconds'
+                WHERE id = :id"""),
+            {"id": intent_id, "token": transfer_token},
+        )
+        connection.execute(
+            text("""UPDATE asset_upload_intents SET operation_state = 'uploaded',
+                operation_revision = operation_revision + 1,
+                operation_claim_token = NULL, operation_claimed_at = NULL,
+                operation_lease_expires_at = NULL, received_bytes = :size,
+                observed_sha256_hex = :digest, transfer_completed_at = clock_timestamp(),
+                recovery_state = 'pending', recovery_revision = recovery_revision + 1
+                WHERE id = :id"""),
+            {"size": observed.byte_size, "digest": observed.sha256, "id": intent_id},
+        )
+        connection.commit()
+        # Let the original upload window expire; transfer evidence was persisted
+        # before expiry and the fixed recovery deadline remains open.
+        time.sleep(2.05)
+        with Session(connection, autoflush=False, expire_on_commit=False) as session:
+            expired = AssetService(
+                session,
+                AssetServiceConfig(project_quota_limit_bytes=100_000, maximum_upload_intent_lifetime=timedelta(hours=1)),
+            ).expire_upload_intent(project_id=project_id, asset_id=asset_id, intent_id=intent_id)
+            assert expired is not None and expired.state == "expired"
+            session.commit()
+
+        with Session(connection, autoflush=False, expire_on_commit=False) as session:
+            claim = AssetRecoveryRepository(session).claim_next()
+            assert claim is not None and claim.intent_id == intent_id
+            version_reference = storage.new_object_version_reference()
+            begun = AssetRecoveryRepository(session).begin_finalization(
+                intent_id,
+                claim.fence,
+                storage_provider="local-private",
+                object_version_reference=version_reference,
+            )
+            assert begun is not None and begun.operation_state == "finalizing"
+            session.commit()
+
+        # Filesystem work is outside the SQL transaction and preserves the temp.
+        finalized = storage.finalize_temporary_object_preserving_temporary(
+            temporary,
+            version_reference,
+            expected_sha256=observed.sha256,
+            expected_byte_size=observed.byte_size,
+        )
+        assert finalized.temporary_preserved
+        config_service = AssetServiceConfig(
+            project_quota_limit_bytes=100_000,
+            maximum_upload_intent_lifetime=timedelta(hours=1),
+        )
+        with Session(connection, autoflush=False, expire_on_commit=False) as session:
+            service = AssetService(session, config_service, storage=storage)
+            with pytest.raises(AssetOperationConflict):
+                service.complete_recovered_upload(
+                    project_id=project_id,
+                    asset_id=asset_id,
+                    intent_id=intent_id,
+                    storage_provider="local-private",
+                    finalized_object=replace(finalized, sha256="0" * 64),
+                    fence=claim.fence,
+                )
+            with pytest.raises(AssetRecoveryConflict):
+                service.complete_recovered_upload(
+                    project_id=project_id,
+                    asset_id=asset_id,
+                    intent_id=intent_id,
+                    storage_provider="local-private",
+                    finalized_object=finalized,
+                    fence=RecoveryFence(uuid4(), claim.claim_generation, claim.recovery_revision),
+                )
+            session.rollback()
+
+        # A caller rollback after all service writes must leave the operation,
+        # version history, and quota reservation unchanged.
+        with Session(connection, autoflush=False, expire_on_commit=False) as session:
+            service = AssetService(session, config_service, storage=storage)
+            result = service.complete_recovered_upload(
+                project_id=project_id,
+                asset_id=asset_id,
+                intent_id=intent_id,
+                storage_provider="local-private",
+                finalized_object=finalized,
+                fence=claim.fence,
+            )
+            assert result is not None and result.created
+            assert result.intent.operation_state == "finalized"
+            assert result.intent.state == "finalized"
+            assert result.version.byte_size == observed.byte_size
+            assert result.version.validation_state == "quarantined"
+            session.rollback()
+
+        with Session(connection, autoflush=False, expire_on_commit=False) as session:
+            assert session.scalar(select(AssetVersion.id).where(AssetVersion.upload_intent_id == intent_id)) is None
+            rolled_back_intent = session.get(AssetUploadIntent, intent_id)
+            assert rolled_back_intent is not None
+            assert (rolled_back_intent.operation_state, rolled_back_intent.state) == ("finalizing", "expired")
+            quota = session.execute(
+                text("SELECT used_bytes, reserved_bytes FROM project_asset_usage WHERE project_id = :project"),
+                {"project": project_id},
+            ).one()
+            assert quota == (0, 100)
+            session.commit()
+
+        # Two fresh transactions racing the same completion serialize on the
+        # project usage lock; one inserts/converts, the other verifies the exact
+        # committed operation as an idempotent duplicate.
+        completion_barrier = Barrier(2)
+
+        def complete_once(_worker: int) -> bool:
+            with engine.connect() as worker_connection:
+                worker_connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+                worker_connection.commit()
+                with Session(worker_connection, autoflush=False, expire_on_commit=False) as session:
+                    completion_barrier.wait(timeout=10)
+                    completion = AssetService(session, config_service, storage=storage).complete_recovered_upload(
+                        project_id=project_id,
+                        asset_id=asset_id,
+                        intent_id=intent_id,
+                        storage_provider="local-private",
+                        finalized_object=finalized,
+                        fence=claim.fence,
+                    )
+                    assert completion is not None
+                    session.commit()
+                    return completion.created
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            created_results = list(executor.map(complete_once, (1, 2)))
+        assert sorted(created_results) == [False, True]
+
+        with Session(connection, autoflush=False, expire_on_commit=False) as session:
+            usage = session.execute(
+                text("SELECT used_bytes, reserved_bytes FROM project_asset_usage WHERE project_id = :project"),
+                {"project": project_id},
+            ).one()
+            # Finalization converts the actual logical bytes to used quota and
+            # releases the unused portion of the reservation exactly once.
+            assert usage == (observed.byte_size, 0)
+            asset = session.get(Asset, asset_id)
+            assert asset is not None and asset.current_ready_version_id is None
+            duplicate = AssetService(session, config_service).complete_recovered_upload(
+                project_id=project_id,
+                asset_id=asset_id,
+                intent_id=intent_id,
+                storage_provider="local-private",
+                finalized_object=finalized,
+                fence=claim.fence,
+            )
+            assert duplicate is not None and not duplicate.created
+            assert session.scalar(
+                select(AssetVersion.id).where(AssetVersion.upload_intent_id == intent_id)
+            ) == duplicate.version.id
+            session.commit()
+        assert storage.inspect_temporary_object(temporary).complete
+    finally:
+        if config is not None and connection is not None:
+            _cleanup_schema(engine, schema, config, connection)
+        else:
+            engine.dispose()
+
+
+def test_retry_failure_enters_manual_when_next_jitter_would_exceed_deadline() -> None:
+    engine, schema = _test_engine_and_schema("retry-deadline")
+    config = None
+    connection = None
+    try:
+        config, connection = _prepare_schema(engine, schema)
+        _project, _asset, intent_id, _owner = _seed_pending_intent(
+            connection, "retry-deadline", expires_seconds=1, recovery_window_seconds=1
+        )
+        deadline = connection.scalar(
+            text("SELECT recovery_deadline_at FROM asset_upload_intents WHERE id = :id"),
+            {"id": intent_id},
+        )
+        connection.commit()
+        with Session(connection, autoflush=False, expire_on_commit=False) as session:
+            repository = AssetRecoveryRepository(session, random_source=lambda _low, high: high)
+            claim = repository.claim_next()
+            assert claim is not None and claim.intent_id == intent_id
+            outcome = repository.record_retryable_failure(intent_id, claim.fence)
+            assert outcome is not None
+            assert outcome.next_retry_at is None and outcome.delay is None
+            assert outcome.intent.recovery_state == "manual"
+            assert outcome.intent.recovery_deadline_at == deadline
+            session.commit()
     finally:
         if config is not None and connection is not None:
             _cleanup_schema(engine, schema, config, connection)

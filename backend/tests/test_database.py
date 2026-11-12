@@ -172,12 +172,15 @@ def test_initial_metadata_has_required_keys_constraints_and_indexes() -> None:
     assert projects.c.updated_at.onupdate is not None
 
 
-def test_alembic_has_one_discoverable_initial_revision() -> None:
+def test_alembic_has_one_discoverable_asset_retry_head() -> None:
     backend_dir = Path(__file__).resolve().parents[1]
     config = Config(str(backend_dir / "alembic.ini"))
     scripts = ScriptDirectory.from_config(config)
 
-    assert scripts.get_current_head() == "20261112_0006_asset_names"
+    assert scripts.get_current_head() == "20261112_0007_asset_retry"
+    retry_revision = scripts.get_revision("20261112_0007_asset_retry")
+    assert retry_revision is not None
+    assert retry_revision.down_revision == "20261112_0006_asset_names"
     names_revision = scripts.get_revision("20261112_0006_asset_names")
     assert names_revision is not None
     assert names_revision.down_revision == "20261112_0005_asset_recovery"
@@ -205,6 +208,7 @@ def test_upload_operation_metadata_models_claims_observations_and_cleanup_separa
         "recovery_claim_generation", "recovery_claim_token", "recovery_claimed_at",
         "recovery_lease_issued_at", "recovery_lease_expires_at", "recovery_attempt_count",
         "recovery_finished_at", "recovery_outcome_code",
+        "next_retry_at",
         "final_storage_provider", "final_object_version_reference", "finalization_started_at",
         "storage_finalized_at", "cleanup_state", "cleanup_revision", "cleanup_updated_at",
         "cleanup_claim_generation", "cleanup_claim_token", "cleanup_claimed_at",
@@ -248,6 +252,7 @@ def test_upload_operation_metadata_models_claims_observations_and_cleanup_separa
         "ck_asset_upload_intents_storage_finalized_after_start",
         "ck_asset_upload_intents_cleanup_state_supported",
         "ck_asset_upload_intents_cleanup_confirmation_consistent",
+        "ck_asset_upload_intents_next_retry_pending_before_deadline",
     } <= checks
     recovery_claim_check = next(
         check for check in uploads.constraints

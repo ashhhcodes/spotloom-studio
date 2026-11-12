@@ -112,6 +112,7 @@ class FinalizedObject:
     temporary_cleanup_confirmed: bool
     project_id: UUID | None = None
     operation_id: UUID | None = None
+    temporary_preserved: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +149,15 @@ class PrivateAssetStorage(Protocol):
     ) -> TemporaryObjectInspection: ...
 
     def finalize_temporary_object(
+        self,
+        temporary: TemporaryObjectReference,
+        object_version: PrivateObjectVersionReference,
+        *,
+        expected_sha256: str,
+        expected_byte_size: int,
+    ) -> FinalizedObject: ...
+
+    def finalize_temporary_object_preserving_temporary(
         self,
         temporary: TemporaryObjectReference,
         object_version: PrivateObjectVersionReference,

@@ -129,6 +129,149 @@ def test_project_operation_bound_reference_allocation_is_stable_and_private(tmp_
         )
 
 
+def test_recovery_finalization_preserves_both_objects_and_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = make_storage(tmp_path)
+    project_id, intent_id = uuid4(), uuid4()
+    temporary = storage.allocate_temporary_reference(
+        project_id=project_id, operation_id=intent_id
+    )
+    storage.create_temporary_object(temporary)
+    payload = b"recovery finalization keeps the source until reconciliation"
+    observation = storage.write_temporary_object(temporary, [payload], max_bytes=1024)
+    version = storage.new_object_version_reference()
+
+    def no_delete(*_args, **_kwargs):
+        raise AssertionError("Recovery finalization must never delete an object.")
+
+    monkeypatch.setattr(storage, "delete_temporary_object", no_delete)
+    monkeypatch.setattr(storage, "delete_finalized_object", no_delete)
+    finalized = storage.finalize_temporary_object_preserving_temporary(
+        temporary,
+        version,
+        expected_sha256=observation.sha256,
+        expected_byte_size=observation.byte_size,
+    )
+    assert finalized.temporary_preserved is True
+    assert finalized.temporary_cleanup_confirmed is False
+    assert finalized.project_id == project_id
+    assert finalized.operation_id == intent_id
+    assert storage.inspect_temporary_object(temporary).complete
+    assert storage.inspect_finalized_object(version) == observation
+
+    repeated = storage.finalize_temporary_object_preserving_temporary(
+        temporary,
+        version,
+        expected_sha256=observation.sha256,
+        expected_byte_size=observation.byte_size,
+    )
+    assert repeated == finalized
+    assert storage.inspect_temporary_object(temporary).complete
+
+
+def test_recovery_finalization_rejects_wrong_provenance_and_observations(
+    tmp_path: Path,
+) -> None:
+    storage = make_storage(tmp_path)
+    project_id, intent_id = uuid4(), uuid4()
+    temporary = storage.allocate_temporary_reference(
+        project_id=project_id, operation_id=intent_id
+    )
+    storage.create_temporary_object(temporary)
+    observation = storage.write_temporary_object(temporary, [b"exact recovery bytes"], max_bytes=100)
+    version = storage.new_object_version_reference()
+
+    with pytest.raises(StorageInvalidReference):
+        storage.finalize_temporary_object_preserving_temporary(
+            TemporaryObjectReference(temporary.value),
+            version,
+            expected_sha256=observation.sha256,
+            expected_byte_size=observation.byte_size,
+        )
+    with pytest.raises(StorageObjectConflict):
+        storage.finalize_temporary_object_preserving_temporary(
+            temporary,
+            version,
+            expected_sha256="0" * 64,
+            expected_byte_size=observation.byte_size,
+        )
+    with pytest.raises(StorageObjectConflict):
+        storage.finalize_temporary_object_preserving_temporary(
+            temporary,
+            version,
+            expected_sha256=observation.sha256,
+            expected_byte_size=observation.byte_size + 1,
+        )
+
+    storage.finalize_temporary_object_preserving_temporary(
+        temporary,
+        version,
+        expected_sha256=observation.sha256,
+        expected_byte_size=observation.byte_size,
+    )
+    other_project = uuid4()
+    other_temporary = storage.allocate_temporary_reference(
+        project_id=other_project, operation_id=uuid4()
+    )
+    storage.create_temporary_object(other_temporary)
+    storage.write_temporary_object(other_temporary, [b"exact recovery bytes"], max_bytes=100)
+    foreign_version = storage.new_object_version_reference()
+    foreign_observation = storage.inspect_temporary_object(other_temporary)
+    storage.finalize_temporary_object_preserving_temporary(
+        other_temporary,
+        foreign_version,
+        expected_sha256=foreign_observation.sha256,
+        expected_byte_size=foreign_observation.byte_size,
+    )
+    with pytest.raises(StorageObjectConflict):
+        storage.finalize_temporary_object_preserving_temporary(
+            temporary,
+            foreign_version,
+            expected_sha256=observation.sha256,
+            expected_byte_size=observation.byte_size,
+        )
+
+
+def test_recovery_finalization_retries_after_ambiguous_link_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import adforge_renderer.local_asset_storage as local_storage_module
+
+    storage = make_storage(tmp_path)
+    temporary = storage.allocate_temporary_reference(project_id=uuid4(), operation_id=uuid4())
+    storage.create_temporary_object(temporary)
+    observation = storage.write_temporary_object(temporary, [b"atomic link outcome"], max_bytes=100)
+    version = storage.new_object_version_reference()
+    real_link = local_storage_module.os.link
+
+    def link_then_lose_response(source, destination, **kwargs) -> None:
+        real_link(source, destination, **kwargs)
+        raise OSError("simulated ambiguous link response")
+
+    monkeypatch.setattr(local_storage_module.os, "link", link_then_lose_response)
+    with pytest.raises(StorageIOFailure):
+        storage.finalize_temporary_object_preserving_temporary(
+            temporary,
+            version,
+            expected_sha256=observation.sha256,
+            expected_byte_size=observation.byte_size,
+        )
+
+    # Recovery retries inspect and verify the already-created exact final
+    # object; neither object is replaced or removed.
+    monkeypatch.setattr(local_storage_module.os, "link", real_link)
+    recovered = storage.finalize_temporary_object_preserving_temporary(
+        temporary,
+        version,
+        expected_sha256=observation.sha256,
+        expected_byte_size=observation.byte_size,
+    )
+    assert recovered.temporary_preserved
+    assert storage.inspect_temporary_object(temporary).complete
+    assert storage.inspect_finalized_object(version) == observation
+
+
 def test_bound_temporary_reference_rejects_foreign_context_and_cleans_only_bound_object(
     tmp_path: Path,
 ) -> None:

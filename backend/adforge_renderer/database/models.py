@@ -269,6 +269,11 @@ class AssetUploadIntent(Base):
             name="recovery_finished_state_consistent",
         ),
         CheckConstraint(
+            "next_retry_at IS NULL OR "
+            "(recovery_state = 'pending' AND next_retry_at < recovery_deadline_at)",
+            name="next_retry_pending_before_deadline",
+        ),
+        CheckConstraint(
             "recovery_outcome_code IS NULL OR "
             "(recovery_state IN ('exhausted', 'manual') AND "
             "recovery_outcome_code IN ('deadline_elapsed', 'attempts_exhausted', "
@@ -400,7 +405,7 @@ class AssetUploadIntent(Base):
         ),
         Index(
             "ix_upload_intents_recovery_due",
-            "recovery_state", "recovery_deadline_at",
+            "recovery_state", "next_retry_at", "recovery_deadline_at",
             postgresql_where=text("recovery_state = 'pending'"),
             sqlite_where=text("recovery_state = 'pending'"),
         ),
@@ -462,6 +467,7 @@ class AssetUploadIntent(Base):
     recovery_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     recovery_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     recovery_outcome_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     observed_sha256_hex: Mapped[str | None] = mapped_column(String(64), nullable=True)
     transfer_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     final_storage_provider: Mapped[str | None] = mapped_column(String(80), nullable=True)
