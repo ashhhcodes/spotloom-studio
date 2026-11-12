@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from adforge_renderer.asset_repository import AssetRepository
+from adforge_renderer.asset_storage_provider import PrivateAssetStorage, TemporaryObjectReference
 from adforge_renderer.database.models import (
     Asset,
     AssetUploadIntent,
@@ -88,12 +89,14 @@ class AssetService:
         config: AssetServiceConfig,
         *,
         clock: Callable[[], datetime] | None = None,
+        storage: PrivateAssetStorage | None = None,
     ) -> None:
         if not isinstance(config, AssetServiceConfig):
             raise AssetServiceConfigurationError("Explicit asset service configuration is required.")
         self.session = session
         self.config = config
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self.storage = storage
 
     def _now(self) -> datetime:
         value = self._clock()
@@ -242,14 +245,33 @@ class AssetService:
                 raise AssetIntentConflict("The idempotency key was already used for a different request.")
             return UploadIntentResult(existing, False)
 
-        self._adjust_usage(usage, reserved=reserved_bytes)
+        if self.storage is None:
+            raise AssetServiceConfigurationError(
+                "Private storage reference allocation is required for new upload intents."
+            )
+        intent_id = uuid4()
+        temporary_reference = self.storage.allocate_temporary_reference(
+            project_id=project_id, operation_id=intent_id
+        )
+        if (
+            type(temporary_reference) is not TemporaryObjectReference
+            or temporary_reference.project_id != project_id
+            or temporary_reference.operation_id != intent_id
+            or type(temporary_reference.value) is not str
+            or not temporary_reference.value
+        ):
+            raise AssetServiceConfigurationError(
+                "Private storage returned an invalid temporary reference."
+            )
+
         now = self._now()
         intent = AssetUploadIntent(
+            id=intent_id,
             project_id=project_id,
             asset_id=asset_id,
             idempotency_key=key,
             request_fingerprint=fingerprint,
-            staging_reference=f"staging:{uuid4().hex}",
+            staging_reference=temporary_reference.value,
             reserved_bytes=reserved_bytes,
             received_bytes=0,
             state="open",
@@ -258,6 +280,10 @@ class AssetService:
         )
         try:
             with self.session.begin_nested():
+                # Reservation and intent persistence share a savepoint so a
+                # rejected/failed insert cannot leave quota partially held if
+                # an internal caller elects to recover the outer transaction.
+                self._adjust_usage(usage, reserved=reserved_bytes)
                 self.session.add(intent)
                 self.session.flush()
         except IntegrityError as exc:
@@ -273,13 +299,8 @@ class AssetService:
                 ).with_for_update()
             )
             if existing is None or existing.request_fingerprint != fingerprint:
-                self._adjust_usage(usage, reserved=-reserved_bytes)
                 raise AssetIntentConflict("The idempotency key conflicted with another request.") from None
-            # The losing transaction tentatively changed the locked usage row;
-            # restore its reservation in the still-valid outer transaction.
-            self._adjust_usage(usage, reserved=-reserved_bytes)
             return UploadIntentResult(existing, False)
-        self.session.flush()
         return UploadIntentResult(intent, True)
 
     def expire_upload_intent(self, *, project_id: UUID, asset_id: UUID, intent_id: UUID) -> AssetUploadIntent | None:

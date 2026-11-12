@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 import subprocess
+from uuid import uuid4
 
 import pytest
 
@@ -76,6 +77,71 @@ def test_references_are_opaque_generated_and_invalid_paths_are_rejected(tmp_path
             storage.inspect_temporary_object(invalid)
     with pytest.raises(StorageInvalidReference):
         storage.open_exact_version(PrivateObjectVersionReference(value="latest"))
+
+
+def test_project_operation_bound_reference_allocation_is_stable_and_private(tmp_path: Path) -> None:
+    storage = make_storage(tmp_path)
+    project_id, operation_id = uuid4(), uuid4()
+    reference = storage.allocate_temporary_reference(
+        project_id=project_id, operation_id=operation_id
+    )
+    assert reference == storage.allocate_temporary_reference(
+        project_id=project_id, operation_id=operation_id
+    )
+    assert reference.value.startswith("tmp_") and len(reference.value) == 36
+    assert "/" not in reference.value and "\\" not in reference.value
+    assert reference != storage.allocate_temporary_reference(
+        project_id=uuid4(), operation_id=operation_id
+    )
+    assert reference != storage.allocate_temporary_reference(
+        project_id=project_id, operation_id=uuid4()
+    )
+    assert not (tmp_path / "private-assets" / "temporary" / reference.value).exists()
+
+    storage.create_temporary_object(reference)
+    # Re-materialization after a lost response is safe and never truncates.
+    assert storage.create_temporary_object(reference) == reference
+    with pytest.raises(StorageInvalidReference):
+        storage.inspect_temporary_object(
+            type(reference)(reference.value, uuid4(), operation_id)
+        )
+    observed = storage.write_temporary_object(reference, [b"bound bytes"], max_bytes=100)
+    assert storage.inspect_temporary_object(reference).sha256 == observed.sha256
+    version = storage.new_object_version_reference()
+    finalized = storage.finalize_temporary_object(
+        reference, version, expected_sha256=observed.sha256,
+        expected_byte_size=observed.byte_size,
+    )
+    assert (finalized.project_id, finalized.operation_id) == (project_id, operation_id)
+    assert storage.inspect_finalized_object(version) == observed
+    retry = storage.finalize_temporary_object(
+        reference, version, expected_sha256=observed.sha256,
+        expected_byte_size=observed.byte_size,
+    )
+    assert (retry.project_id, retry.operation_id) == (project_id, operation_id)
+    foreign_reference = storage.allocate_temporary_reference(
+        project_id=uuid4(), operation_id=operation_id
+    )
+    with pytest.raises(StorageObjectConflict):
+        storage.finalize_temporary_object(
+            foreign_reference, version, expected_sha256=observed.sha256,
+            expected_byte_size=observed.byte_size,
+        )
+
+
+def test_bound_temporary_reference_rejects_foreign_context_and_cleans_only_bound_object(
+    tmp_path: Path,
+) -> None:
+    storage = make_storage(tmp_path)
+    project_id, operation_id = uuid4(), uuid4()
+    reference = storage.allocate_temporary_reference(
+        project_id=project_id, operation_id=operation_id
+    )
+    storage.create_temporary_object(reference)
+    foreign = type(reference)(reference.value, uuid4(), operation_id)
+    with pytest.raises(StorageInvalidReference):
+        storage.write_temporary_object(foreign, [b"no"], max_bytes=10)
+    assert storage.delete_temporary_object(reference).physically_absent
 
 
 def test_exclusive_temporary_creation_streaming_observation_and_exact_read(tmp_path: Path) -> None:

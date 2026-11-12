@@ -415,14 +415,17 @@ def test_recovery_completion_manual_and_deadline_transitions_on_disposable_postg
         project_id, asset_id, complete_id, _owner = _seed_pending_intent(connection, "complete")
         _project, _asset, manual_id, _owner = _seed_pending_intent(connection, "manual")
         _project, _asset, deadline_id, _owner = _seed_pending_intent(
-            connection, "deadline", expires_seconds=3, recovery_window_seconds=1
+            connection, "deadline", expires_seconds=3, recovery_window_seconds=8
         )
         connection.commit()
 
         with Session(connection, autoflush=False, expire_on_commit=False) as session:
             repository = AssetRecoveryRepository(session)
             deadline_claim = repository.claim_next(
-                lease_duration=timedelta(milliseconds=20)
+                # Keep this setup claim live while the other two seeded rows
+                # are claimed; the 20 ms leases below are reserved for the
+                # explicit expiry/reclaim assertions.
+                lease_duration=timedelta(seconds=1)
             )
             complete_claim = repository.claim_next()
             manual_claim = repository.claim_next()
@@ -490,6 +493,9 @@ def test_recovery_completion_manual_and_deadline_transitions_on_disposable_postg
 
         # Exhaust all ten claims before the short immutable deadline. Once the
         # deadline has elapsed, exhaustion must defer to manual reconciliation.
+        # Let the setup lease expire only after the other seeded rows were
+        # claimed; subsequent 20 ms leases exercise explicit reclaim.
+        time.sleep(1.05)
         for attempt in range(1, ASSET_RECOVERY_MAX_ATTEMPTS):
             time.sleep(0.03)
             with Session(connection, autoflush=False, expire_on_commit=False) as session:

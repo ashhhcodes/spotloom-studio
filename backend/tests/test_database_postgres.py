@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
@@ -29,9 +29,17 @@ from adforge_renderer.asset_service import (
     AssetService,
     AssetServiceConfig,
 )
+from adforge_renderer.asset_storage_provider import TemporaryObjectReference
 from sqlalchemy.orm import sessionmaker
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, local
+
+
+class _ReferenceAllocator:
+    def allocate_temporary_reference(
+        self, *, project_id: UUID, operation_id: UUID
+    ) -> TemporaryObjectReference:
+        return TemporaryObjectReference(f"tmp_{operation_id.hex}", project_id, operation_id)
 
 
 def _local_disposable_test_config() -> DatabaseConfig | None:
@@ -1691,7 +1699,7 @@ def test_asset_upload_intent_quota_concurrency_on_disposable_spotloom_test() -> 
             with factory.begin() as session:
                 start.wait(timeout=10)
                 return AssetService(
-                    session, config, clock=lambda: now
+                    session, config, clock=lambda: now, storage=_ReferenceAllocator()
                 ).create_upload_intent(
                     project_id=project_id,
                     asset_id=asset_id,
@@ -1713,7 +1721,7 @@ def test_asset_upload_intent_quota_concurrency_on_disposable_spotloom_test() -> 
                 with factory.begin() as session:
                     race_barrier.wait(timeout=10)
                     result = AssetService(
-                        session, config, clock=lambda: now
+                        session, config, clock=lambda: now, storage=_ReferenceAllocator()
                     ).create_upload_intent(
                         project_id=project_id,
                         asset_id=asset_id,

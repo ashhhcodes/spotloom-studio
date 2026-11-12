@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import BinaryIO, Iterable, Protocol
+from uuid import UUID
 
 from .asset_contract import PrivateObjectVersionReference
 
@@ -72,9 +73,16 @@ class StorageConfigurationError(AssetStorageError):
 
 @dataclass(frozen=True, slots=True)
 class TemporaryObjectReference:
-    """Opaque handle for one server-created temporary object."""
+    """Opaque storage handle bound to one project and upload operation.
+
+    The database persists only ``value``. Trusted backend code reconstructs
+    the handle from that value and the owning row before calling storage.
+    These identifiers are context, not caller-provided authorization.
+    """
 
     value: str
+    project_id: UUID | None = None
+    operation_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +110,8 @@ class FinalizedObject:
     byte_size: int
     sha256: str
     temporary_cleanup_confirmed: bool
+    project_id: UUID | None = None
+    operation_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,7 +125,13 @@ class CleanupConfirmation:
 class PrivateAssetStorage(Protocol):
     """Narrow provider-independent interface; references are not credentials."""
 
-    def create_temporary_object(self) -> TemporaryObjectReference: ...
+    def allocate_temporary_reference(
+        self, *, project_id: UUID, operation_id: UUID
+    ) -> TemporaryObjectReference: ...
+
+    def create_temporary_object(
+        self, reference: TemporaryObjectReference | None = None, /
+    ) -> TemporaryObjectReference: ...
 
     def new_object_version_reference(self) -> PrivateObjectVersionReference: ...
 
