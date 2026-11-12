@@ -1,0 +1,713 @@
+"""Private local development implementation of the asset storage contract.
+
+This module is deliberately independent of HTTP, SQLAlchemy, project ownership,
+and media validation. The configured directory must be private and must not be
+served by another process. It is not a production storage guarantee.
+"""
+
+from __future__ import annotations
+
+import csv
+from dataclasses import dataclass
+import errno
+import hashlib
+import os
+from pathlib import Path
+import re
+import stat
+import struct
+import subprocess
+import sys
+from collections.abc import Iterable, Mapping
+from typing import BinaryIO
+from uuid import UUID, uuid4
+
+from pydantic import ValidationError
+
+from .asset_contract import PrivateObjectVersionReference
+from .asset_storage_provider import (
+    MAX_STORAGE_CHUNK_BYTES,
+    AssetStorageError,
+    CleanupConfirmation,
+    FinalizedObject,
+    StorageAtomicOperationUnsupported,
+    StorageCleanupNotConfirmed,
+    StorageConfigurationError,
+    StorageIOFailure,
+    StorageInvalidReference,
+    StorageObjectConflict,
+    StorageObjectIncomplete,
+    StorageObjectMissing,
+    StorageSizeLimitExceeded,
+    TemporaryObjectInspection,
+    TemporaryObjectReference,
+    TransferObservation,
+)
+from .environment import load_backend_environment
+
+
+_TEMP_REF = re.compile(r"^tmp_[0-9a-f]{32}$")
+_VERSION_REF = re.compile(r"^ver_[0-9a-f]{32}$")
+_TEMP_META = struct.Struct(">4sQQ32s")  # magic, limit, count, raw SHA-256
+_FINAL_META = struct.Struct(">4s16sQ32s")  # magic, originating temp UUID, count, digest
+_TEMP_MAGIC = b"SLT1"
+_FINAL_MAGIC = b"SLV1"
+_ROOT_MARKER = ".spotloom-private-storage-v1"
+_REPARSE_POINT = 0x400
+_PROTECTED_WEB_DIRS = {"public", "static", "www", "wwwroot", "htdocs", "httpdocs"}
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+@dataclass(frozen=True, slots=True)
+class LocalAssetStorageConfig:
+    """An explicit absolute local storage root; no repository-local default."""
+
+    root: Path
+
+    @classmethod
+    def from_environment(
+        cls, environ: Mapping[str, str] | None = None,
+    ) -> LocalAssetStorageConfig:
+        source = os.environ if environ is None else environ
+        if environ is None:
+            load_backend_environment()
+            source = os.environ
+        raw = source.get("SPOTLOOM_ASSET_STORAGE_ROOT")
+        if not isinstance(raw, str) or not raw or raw != raw.strip():
+            raise StorageConfigurationError()
+        try:
+            configured = Path(raw)
+            if not configured.is_absolute() or ".." in configured.parts:
+                raise ValueError
+            _reject_reparse_components(configured)
+            resolved = configured.resolve(strict=False)
+            _reject_reparse_components(resolved)
+            _validate_root_location(resolved)
+            return cls(resolved)
+        except (OSError, RuntimeError, ValueError):
+            raise StorageConfigurationError() from None
+
+
+def _is_reparse(stat_result: os.stat_result) -> bool:
+    return stat.S_ISLNK(stat_result.st_mode) or bool(
+        getattr(stat_result, "st_file_attributes", 0) & _REPARSE_POINT
+    )
+
+
+def _reject_reparse_components(path: Path) -> None:
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            continue
+        if _is_reparse(info):
+            raise ValueError("reparse points are not accepted in storage paths")
+
+
+def _validate_root_location(root: Path) -> None:
+    try:
+        root.relative_to(_REPOSITORY_ROOT)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("storage root must be outside the repository")
+    if any(part.casefold() in _PROTECTED_WEB_DIRS for part in root.parts):
+        raise ValueError("storage root must not be under a conventional web directory")
+
+
+def _identity(info: os.stat_result) -> tuple[int, int]:
+    return info.st_dev, info.st_ino
+
+
+class LocalPrivateAssetStorage:
+    """Private local adapter using exclusive files and create-only hard links.
+
+    Finalization uses ``os.link`` as the atomic no-replace primitive. It works
+    only when the filesystem supports hard links and both directories share a
+    filesystem; the adapter never falls back to overwrite-capable rename.
+    """
+
+    def __init__(self, config: LocalAssetStorageConfig) -> None:
+        if type(config) is not LocalAssetStorageConfig:
+            raise StorageConfigurationError()
+        root = config.root
+        try:
+            if not root.is_absolute() or ".." in root.parts:
+                raise ValueError
+            _reject_reparse_components(root)
+            root = root.resolve(strict=False)
+            _reject_reparse_components(root)
+            _validate_root_location(root)
+            existed = root.exists()
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            root_info = root.lstat()
+            if _is_reparse(root_info) or not stat.S_ISDIR(root_info.st_mode):
+                raise ValueError
+            if not existed and os.name != "nt":
+                os.chmod(root, 0o700)
+            marker = root / _ROOT_MARKER
+            if not marker.exists():
+                if any(root.iterdir()):
+                    raise ValueError
+                if os.name == "nt":
+                    self._secure_windows_acl(root)
+                self._write_marker(marker)
+            elif os.name == "nt":
+                self._secure_windows_acl(root)
+            elif stat.S_IMODE(root_info.st_mode) & 0o077:
+                os.chmod(root, 0o700)
+
+            temporary = root / "temporary"
+            versions = root / "versions"
+            temporary.mkdir(mode=0o700, exist_ok=True)
+            versions.mkdir(mode=0o700, exist_ok=True)
+            for directory in (root, temporary, versions):
+                info = directory.lstat()
+                if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+                    raise ValueError
+                if os.name != "nt":
+                    if stat.S_IMODE(info.st_mode) & 0o077:
+                        os.chmod(directory, 0o700)
+            self.__root = root
+            self.__temporary = temporary
+            self.__versions = versions
+            self.__root_identity = _identity(root.lstat())
+            self.__temporary_identity = _identity(temporary.lstat())
+            self.__versions_identity = _identity(versions.lstat())
+            self._verify_layout()
+        except StorageConfigurationError:
+            raise
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            raise StorageConfigurationError() from None
+
+    @staticmethod
+    def _write_marker(path: Path) -> None:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        fd = os.open(path, flags, 0o600)
+        try:
+            with os.fdopen(fd, "wb", closefd=False) as marker:
+                value = b"Spotloom private local storage v1\n"
+                if marker.write(value) != len(value):
+                    raise OSError("short marker write")
+                marker.flush()
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _secure_windows_acl(root: Path) -> None:
+        """Protect the dedicated root and inherited children with Windows ACLs."""
+        try:
+            identity = subprocess.run(
+                ["whoami.exe", "/user", "/fo", "csv", "/nh"],
+                check=True, capture_output=True, text=True, timeout=10,
+            )
+            rows = list(csv.reader(identity.stdout.splitlines()))
+            sid = rows[0][-1].strip() if rows and rows[0] else ""
+            if not re.fullmatch(r"S-1-[0-9-]+", sid):
+                raise ValueError
+            entries = [
+                f"*{sid}:(OI)(CI)F",
+                "*S-1-5-18:(OI)(CI)F",  # Local System
+                "*S-1-5-32-544:(OI)(CI)F",  # Built-in Administrators
+            ]
+            subprocess.run(
+                ["icacls.exe", str(root), "/inheritance:r", "/grant:r", *entries],
+                check=True, capture_output=True, text=True, timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError, IndexError, ValueError):
+            raise StorageConfigurationError() from None
+
+    def _verify_layout(self) -> None:
+        expected = (
+            (self.__root, self.__root_identity),
+            (self.__temporary, self.__temporary_identity),
+            (self.__versions, self.__versions_identity),
+        )
+        try:
+            for path, expected_identity in expected:
+                info = path.lstat()
+                if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+                    raise ValueError
+                if _identity(info) != expected_identity:
+                    raise ValueError
+            marker = self.__root / _ROOT_MARKER
+            info = marker.lstat()
+            if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
+                raise ValueError
+        except (OSError, ValueError):
+            raise StorageIOFailure() from None
+
+    @staticmethod
+    def _validate_temporary(reference: object) -> str:
+        if type(reference) is not TemporaryObjectReference or not isinstance(reference.value, str):
+            raise StorageInvalidReference()
+        if not _TEMP_REF.fullmatch(reference.value):
+            raise StorageInvalidReference()
+        return reference.value
+
+    @staticmethod
+    def _validate_version(reference: object) -> str:
+        if type(reference) is not PrivateObjectVersionReference:
+            raise StorageInvalidReference()
+        try:
+            validated = PrivateObjectVersionReference.model_validate(
+                reference.model_dump(mode="python", warnings=False)
+            )
+        except (ValidationError, TypeError, ValueError, AttributeError):
+            raise StorageInvalidReference() from None
+        if not _VERSION_REF.fullmatch(validated.value):
+            raise StorageInvalidReference()
+        return validated.value
+
+    def create_temporary_object(self) -> TemporaryObjectReference:
+        self._verify_layout()
+        value = f"tmp_{uuid4().hex}"
+        directory = self.__temporary / value
+        created = False
+        try:
+            os.mkdir(directory, 0o700)
+            created = True
+            payload = directory / "payload"
+            fd = os.open(
+                payload,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+                0o600,
+            )
+            os.close(fd)
+            return TemporaryObjectReference(value)
+        except FileExistsError:
+            if created:
+                try:
+                    for name in ("payload", "complete", "writing"):
+                        path = directory / name
+                        info = self._lstat_regular(path, missing_ok=True)
+                        if info is not None:
+                            path.unlink()
+                    directory.rmdir()
+                except (OSError, AssetStorageError):
+                    pass
+            raise StorageObjectConflict() from None
+        except OSError:
+            if created:
+                try:
+                    for name in ("payload", "complete", "writing"):
+                        path = directory / name
+                        info = self._lstat_regular(path, missing_ok=True)
+                        if info is not None:
+                            path.unlink()
+                    directory.rmdir()
+                except (OSError, AssetStorageError):
+                    pass
+            raise StorageIOFailure() from None
+
+    def new_object_version_reference(self) -> PrivateObjectVersionReference:
+        self._verify_layout()
+        return PrivateObjectVersionReference(value=f"ver_{uuid4().hex}")
+
+    def _temp_dir(self, reference: object) -> Path:
+        self._verify_layout()
+        return self.__temporary / self._validate_temporary(reference)
+
+    def _temp_files(self, reference: object) -> tuple[Path, Path, Path]:
+        directory = self._temp_dir(reference)
+        self._verify_directory(directory)
+        return directory / "payload", directory / "complete", directory / "writing"
+
+    def _verify_directory(self, path: Path) -> None:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            raise StorageObjectMissing() from None
+        except OSError:
+            raise StorageIOFailure() from None
+        if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+            raise StorageInvalidReference()
+
+    @staticmethod
+    def _lstat_regular(path: Path, *, missing_ok: bool = False) -> os.stat_result | None:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise StorageObjectMissing() from None
+        except OSError:
+            raise StorageIOFailure() from None
+        if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
+            raise StorageInvalidReference()
+        return info
+
+    @staticmethod
+    def _open_read(path: Path) -> BinaryIO:
+        before = LocalPrivateAssetStorage._lstat_regular(path)
+        assert before is not None
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+            after = os.fstat(fd)
+            if not stat.S_ISREG(after.st_mode) or _identity(before) != _identity(after):
+                os.close(fd)
+                raise StorageInvalidReference()
+            return os.fdopen(fd, "rb")
+        except StorageInvalidReference:
+            raise
+        except FileNotFoundError:
+            raise StorageObjectMissing() from None
+        except OSError:
+            raise StorageIOFailure() from None
+
+    @staticmethod
+    def _read_marker(path: Path, expected_size: int) -> bytes:
+        info = LocalPrivateAssetStorage._lstat_regular(path)
+        assert info is not None
+        if info.st_size != expected_size:
+            raise StorageObjectIncomplete()
+        try:
+            with LocalPrivateAssetStorage._open_read(path) as stream:
+                data = stream.read(expected_size + 1)
+        except AssetStorageError:
+            raise
+        except OSError:
+            raise StorageIOFailure() from None
+        if len(data) != expected_size:
+            raise StorageObjectIncomplete()
+        return data
+
+    @staticmethod
+    def _hash_stream(stream: BinaryIO, *, expected_size: int | None = None) -> TransferObservation:
+        digest = hashlib.sha256()
+        count = 0
+        try:
+            while True:
+                chunk = stream.read(MAX_STORAGE_CHUNK_BYTES)
+                if not chunk:
+                    break
+                count += len(chunk)
+                if expected_size is not None and count > expected_size:
+                    raise StorageObjectIncomplete()
+                digest.update(chunk)
+        except AssetStorageError:
+            raise
+        except OSError:
+            raise StorageIOFailure() from None
+        if expected_size is not None and count != expected_size:
+            raise StorageObjectIncomplete()
+        return TransferObservation(count, digest.hexdigest())
+
+    def write_temporary_object(
+        self,
+        reference: TemporaryObjectReference,
+        chunks: Iterable[bytes],
+        *,
+        max_bytes: int,
+    ) -> TransferObservation:
+        if type(max_bytes) is not int or max_bytes <= 0:
+            raise StorageSizeLimitExceeded()
+        payload, complete, writing = self._temp_files(reference)
+        self._lstat_regular(payload)
+        if self._lstat_regular(complete, missing_ok=True) is not None:
+            raise StorageObjectConflict()
+        try:
+            lock_fd = os.open(
+                writing,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+                0o600,
+            )
+        except FileExistsError:
+            raise StorageObjectIncomplete() from None
+        except OSError:
+            raise StorageIOFailure() from None
+
+        digest = hashlib.sha256()
+        count = 0
+        try:
+            os.close(lock_fd)
+            payload_info = self._lstat_regular(payload)
+            assert payload_info is not None
+            if payload_info.st_size != 0:
+                raise StorageObjectIncomplete()
+            fd = os.open(
+                payload,
+                os.O_WRONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                opened_info = os.fstat(fd)
+                if not stat.S_ISREG(opened_info.st_mode) or _identity(payload_info) != _identity(opened_info):
+                    raise StorageInvalidReference()
+                raw_stream = os.fdopen(fd, "wb", buffering=0, closefd=False)
+                with raw_stream as stream:
+                    iterator = iter(chunks)
+                    try:
+                        for chunk in iterator:
+                            if type(chunk) is not bytes:
+                                raise StorageIOFailure()
+                            if len(chunk) > MAX_STORAGE_CHUNK_BYTES:
+                                raise StorageSizeLimitExceeded()
+                            if count + len(chunk) > max_bytes:
+                                raise StorageSizeLimitExceeded()
+                            if not chunk:
+                                continue
+                            written = stream.write(chunk)
+                            if written != len(chunk):
+                                raise StorageIOFailure()
+                            count += written
+                            digest.update(chunk)
+                    finally:
+                        close = getattr(iterator, "close", None)
+                        if callable(close):
+                            active_error = sys.exc_info()[0]
+                            try:
+                                close()
+                            except Exception:
+                                if active_error is None:
+                                    raise
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            finally:
+                os.close(fd)
+
+            hexdigest = digest.hexdigest()
+            marker_data = _TEMP_META.pack(
+                _TEMP_MAGIC, max_bytes, count, bytes.fromhex(hexdigest)
+            )
+            marker_fd = os.open(
+                complete,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+                0o600,
+            )
+            with os.fdopen(marker_fd, "wb") as marker:
+                if marker.write(marker_data) != len(marker_data):
+                    raise StorageIOFailure()
+                marker.flush()
+                os.fsync(marker.fileno())
+            self._unlink_known(writing)
+            return TransferObservation(count, hexdigest)
+        except AssetStorageError:
+            raise
+        except Exception:
+            raise StorageIOFailure() from None
+
+    def _inspect_temporary(
+        self, reference: object,
+    ) -> tuple[TemporaryObjectInspection, Path, Path]:
+        payload, complete, _writing = self._temp_files(reference)
+        payload_info = self._lstat_regular(payload, missing_ok=True)
+        marker_info = self._lstat_regular(complete, missing_ok=True)
+        if payload_info is None and marker_info is None:
+            raise StorageObjectMissing()
+        if marker_info is None:
+            return TemporaryObjectInspection(False, payload_info.st_size if payload_info else 0, None), payload, complete
+        raw = self._read_marker(complete, _TEMP_META.size)
+        magic, limit, recorded_size, recorded_digest = _TEMP_META.unpack(raw)
+        if magic != _TEMP_MAGIC or recorded_size > limit:
+            raise StorageObjectIncomplete()
+        if payload_info is None or payload_info.st_size != recorded_size:
+            raise StorageObjectIncomplete()
+        with self._open_read(payload) as stream:
+            observed = self._hash_stream(stream, expected_size=recorded_size)
+        if observed.sha256 != recorded_digest.hex():
+            raise StorageObjectIncomplete()
+        return TemporaryObjectInspection(True, observed.byte_size, observed.sha256), payload, complete
+
+    def inspect_temporary_object(
+        self, reference: TemporaryObjectReference, /
+    ) -> TemporaryObjectInspection:
+        return self._inspect_temporary(reference)[0]
+
+    def _final_paths(self, reference: object) -> tuple[str, Path, Path]:
+        self._verify_layout()
+        key = self._validate_version(reference)
+        return key, self.__versions / f"{key}.blob", self.__versions / f"{key}.manifest"
+
+    def _inspect_final(self, reference: object) -> tuple[TransferObservation, bytes, Path, Path]:
+        key, object_path, manifest_path = self._final_paths(reference)
+        object_info = self._lstat_regular(object_path, missing_ok=True)
+        manifest_info = self._lstat_regular(manifest_path, missing_ok=True)
+        if object_info is None and manifest_info is None:
+            raise StorageObjectMissing()
+        if object_info is None or manifest_info is None:
+            raise StorageObjectIncomplete()
+        manifest = self._read_marker(manifest_path, _FINAL_META.size)
+        magic, operation_id, count, expected_digest = _FINAL_META.unpack(manifest)
+        if magic != _FINAL_MAGIC or object_info.st_size != count:
+            raise StorageObjectIncomplete()
+        with self._open_read(object_path) as stream:
+            observed = self._hash_stream(stream, expected_size=count)
+        if observed.sha256 != expected_digest.hex():
+            raise StorageObjectIncomplete()
+        return observed, operation_id, object_path, manifest_path
+
+    def inspect_finalized_object(
+        self, object_version: PrivateObjectVersionReference, /
+    ) -> TransferObservation:
+        return self._inspect_final(object_version)[0]
+
+    def finalize_temporary_object(
+        self,
+        temporary: TemporaryObjectReference,
+        object_version: PrivateObjectVersionReference,
+        *,
+        expected_sha256: str,
+        expected_byte_size: int,
+    ) -> FinalizedObject:
+        temp_key = self._validate_temporary(temporary)
+        version_key, destination, manifest_path = self._final_paths(object_version)
+        if (type(expected_sha256) is not str or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
+                or type(expected_byte_size) is not int or expected_byte_size < 0):
+            raise StorageObjectIncomplete()
+        operation_id = UUID(hex=temp_key.removeprefix("tmp_")).bytes
+        try:
+            inspection, source, _complete = self._inspect_temporary(temporary)
+        except StorageObjectMissing:
+            # A retry after successful finalization may arrive after temporary
+            # cleanup. The persisted manifest proves this exact temp operation
+            # and expected byte observation already finalized this reference.
+            try:
+                observed, actual_operation_id, _object, _manifest = self._inspect_final(object_version)
+            except StorageObjectMissing:
+                raise
+            if (actual_operation_id != operation_id or observed.byte_size != expected_byte_size
+                    or observed.sha256 != expected_sha256):
+                raise StorageObjectConflict() from None
+            return FinalizedObject(
+                object_version=PrivateObjectVersionReference(value=version_key),
+                byte_size=observed.byte_size,
+                sha256=observed.sha256,
+                temporary_cleanup_confirmed=True,
+            )
+        if not inspection.complete or inspection.sha256 is None:
+            raise StorageObjectIncomplete()
+        if inspection.byte_size != expected_byte_size or inspection.sha256 != expected_sha256:
+            raise StorageObjectConflict()
+        if inspection.byte_size == 0:
+            # The provider records empty transfers, but media admission rejects
+            # them; current asset-version persistence also requires > 0 bytes.
+            raise StorageObjectIncomplete()
+
+        manifest_data = _FINAL_META.pack(
+            _FINAL_MAGIC, operation_id, inspection.byte_size, bytes.fromhex(inspection.sha256)
+        )
+        existing_manifest = self._lstat_regular(manifest_path, missing_ok=True)
+        existing_object = self._lstat_regular(destination, missing_ok=True)
+        if existing_manifest is None and existing_object is not None:
+            raise StorageObjectConflict()
+        if existing_manifest is None:
+            try:
+                fd = os.open(
+                    manifest_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+                    0o600,
+                )
+                with os.fdopen(fd, "wb") as manifest:
+                    if manifest.write(manifest_data) != len(manifest_data):
+                        raise StorageIOFailure()
+                    manifest.flush()
+                    os.fsync(manifest.fileno())
+            except FileExistsError:
+                pass
+            except StorageIOFailure:
+                raise
+            except OSError:
+                raise StorageIOFailure() from None
+        current_manifest = self._read_marker(manifest_path, _FINAL_META.size)
+        if current_manifest != manifest_data:
+            raise StorageObjectConflict()
+
+        existing_object = self._lstat_regular(destination, missing_ok=True)
+        if existing_object is None:
+            try:
+                # Hard-link creation is atomic and fails if the target exists.
+                # No rename/copy fallback is permitted.
+                os.link(source, destination, follow_symlinks=False)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                if (exc.errno in (errno.EXDEV, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS)
+                        or getattr(exc, "winerror", None) in {1, 17, 50, 1314}):
+                    raise StorageAtomicOperationUnsupported() from None
+                raise StorageIOFailure() from None
+            except (NotImplementedError, TypeError):
+                raise StorageAtomicOperationUnsupported() from None
+
+        observed, actual_operation_id, _destination, _manifest = self._inspect_final(object_version)
+        if (actual_operation_id != operation_id or observed.byte_size != expected_byte_size
+                or observed.sha256 != expected_sha256):
+            raise StorageObjectConflict()
+        cleanup_confirmed = True
+        try:
+            self.delete_temporary_object(temporary)
+        except (StorageCleanupNotConfirmed, StorageIOFailure, StorageInvalidReference):
+            cleanup_confirmed = False
+        return FinalizedObject(
+            object_version=PrivateObjectVersionReference(value=version_key),
+            byte_size=observed.byte_size,
+            sha256=observed.sha256,
+            temporary_cleanup_confirmed=cleanup_confirmed,
+        )
+
+    def open_exact_version(
+        self, object_version: PrivateObjectVersionReference, /
+    ) -> BinaryIO:
+        _key, object_path, manifest_path = self._final_paths(object_version)
+        object_info = self._lstat_regular(object_path)
+        manifest_info = self._lstat_regular(manifest_path)
+        assert object_info is not None and manifest_info is not None
+        manifest = self._read_marker(manifest_path, _FINAL_META.size)
+        magic, _operation_id, count, _digest = _FINAL_META.unpack(manifest)
+        if magic != _FINAL_MAGIC or object_info.st_size != count:
+            raise StorageObjectIncomplete()
+        return self._open_read(object_path)
+
+    def _unlink_known(self, path: Path) -> bool:
+        self._verify_layout()
+        if self._lstat_regular(path, missing_ok=True) is None:
+            return True
+        try:
+            path.unlink()
+            return self._lstat_regular(path, missing_ok=True) is None
+        except OSError:
+            return False
+
+    def delete_temporary_object(
+        self, reference: TemporaryObjectReference, /
+    ) -> CleanupConfirmation:
+        directory = self._temp_dir(reference)
+        try:
+            self._verify_directory(directory)
+        except StorageObjectMissing:
+            return CleanupConfirmation(reference, True)
+        expected = {"payload", "complete", "writing"}
+        try:
+            if any(entry.name not in expected for entry in directory.iterdir()):
+                raise StorageCleanupNotConfirmed()
+            for name in expected:
+                if not self._unlink_known(directory / name):
+                    raise StorageCleanupNotConfirmed()
+            directory.rmdir()
+            if directory.exists() or directory.is_symlink():
+                raise StorageCleanupNotConfirmed()
+            return CleanupConfirmation(reference, True)
+        except (StorageInvalidReference, StorageCleanupNotConfirmed):
+            raise StorageCleanupNotConfirmed() from None
+        except OSError:
+            raise StorageCleanupNotConfirmed() from None
+
+    def delete_finalized_object(
+        self, object_version: PrivateObjectVersionReference, /
+    ) -> CleanupConfirmation:
+        _key, object_path, manifest_path = self._final_paths(object_version)
+        try:
+            if not self._unlink_known(object_path):
+                raise StorageCleanupNotConfirmed()
+            if not self._unlink_known(manifest_path):
+                raise StorageCleanupNotConfirmed()
+            if object_path.exists() or manifest_path.exists():
+                raise StorageCleanupNotConfirmed()
+            return CleanupConfirmation(object_version, True)
+        except (StorageInvalidReference, StorageCleanupNotConfirmed):
+            raise StorageCleanupNotConfirmed() from None
+        except OSError:
+            raise StorageCleanupNotConfirmed() from None
