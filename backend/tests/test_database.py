@@ -24,6 +24,10 @@ from adforge_renderer.database.models import (
     AssetValidationAttempt,
     AssetValidationEvidence,
     AssetVersion,
+    ASSET_RECOVERY_LEASE_RENEWAL_INTERVAL,
+    ASSET_RECOVERY_MAX_ATTEMPTS,
+    ASSET_RECOVERY_MAX_LEASE,
+    ASSET_RECOVERY_MAX_WINDOW,
     PROJECT_NAME_MAX_LENGTH,
     Base,
     ExternalIdentity,
@@ -173,7 +177,10 @@ def test_alembic_has_one_discoverable_initial_revision() -> None:
     config = Config(str(backend_dir / "alembic.ini"))
     scripts = ScriptDirectory.from_config(config)
 
-    assert scripts.get_current_head() == "20261112_0004_asset_upload_ops"
+    assert scripts.get_current_head() == "20261112_0005_asset_recovery"
+    recovery_revision = scripts.get_revision("20261112_0005_asset_recovery")
+    assert recovery_revision is not None
+    assert recovery_revision.down_revision == "20261112_0004_asset_upload_ops"
     revision = scripts.get_revision("20261112_0004_asset_upload_ops")
     assert revision is not None
     assert revision.down_revision == "20261112_0003_asset_persistence"
@@ -191,6 +198,10 @@ def test_upload_operation_metadata_models_claims_observations_and_cleanup_separa
         "operation_state", "operation_revision", "operation_updated_at",
         "operation_claim_generation", "operation_claim_token", "operation_claimed_at",
         "operation_lease_expires_at", "observed_sha256_hex", "transfer_completed_at",
+        "recovery_deadline_at", "recovery_state", "recovery_revision",
+        "recovery_claim_generation", "recovery_claim_token", "recovery_claimed_at",
+        "recovery_lease_issued_at", "recovery_lease_expires_at", "recovery_attempt_count",
+        "recovery_finished_at", "recovery_outcome_code",
         "final_storage_provider", "final_object_version_reference", "finalization_started_at",
         "storage_finalized_at", "cleanup_state", "cleanup_revision", "cleanup_updated_at",
         "cleanup_claim_generation", "cleanup_claim_token", "cleanup_claimed_at",
@@ -199,6 +210,8 @@ def test_upload_operation_metadata_models_claims_observations_and_cleanup_separa
     assert required_columns <= set(uploads.c.keys())
     assert uploads.c.operation_state.server_default is not None
     assert uploads.c.operation_claim_token.nullable
+    assert uploads.c.recovery_deadline_at.server_default is None
+    assert uploads.c.recovery_deadline_at.default is not None
     assert uploads.c.observed_sha256_hex.nullable
     assert uploads.c.final_object_version_reference.nullable
     assert uploads.c.cleanup_confirmed_at.nullable
@@ -214,6 +227,17 @@ def test_upload_operation_metadata_models_claims_observations_and_cleanup_separa
         "ck_asset_upload_intents_operation_revision_nonnegative",
         "ck_asset_upload_intents_operation_claim_lease_consistent",
         "ck_asset_upload_intents_operation_lease_bounded",
+        "ck_asset_upload_intents_active_transfer_claim_required",
+        "ck_asset_upload_intents_recovery_state_supported",
+        "ck_asset_upload_intents_recovery_claim_state_consistent",
+        "ck_asset_upload_intents_recovery_deadline_after_expiry",
+        "ck_asset_upload_intents_recovery_deadline_max_window",
+        "ck_asset_upload_intents_recovery_claim_lease_consistent",
+        "ck_asset_upload_intents_recovery_lease_bounded",
+        "ck_asset_upload_intents_recovery_attempt_count_bounded",
+        "ck_asset_upload_intents_recovery_finished_state_consistent",
+        "ck_asset_upload_intents_recovery_finalized_consistent",
+        "ck_asset_upload_intents_transfer_completed_before_expiry",
         "ck_asset_upload_intents_transfer_observation_consistent",
         "ck_asset_upload_intents_completed_transfer_observed",
         "ck_asset_upload_intents_final_reference_pair_consistent",
@@ -222,10 +246,23 @@ def test_upload_operation_metadata_models_claims_observations_and_cleanup_separa
         "ck_asset_upload_intents_cleanup_state_supported",
         "ck_asset_upload_intents_cleanup_confirmation_consistent",
     } <= checks
+    recovery_claim_check = next(
+        check for check in uploads.constraints
+        if isinstance(check, CheckConstraint)
+        and check.name == "ck_asset_upload_intents_recovery_claim_state_consistent"
+    )
+    assert "recovery_state = 'claimed'" in str(recovery_claim_check.sqltext)
+    assert "recovery_claim_token IS NOT NULL" in str(recovery_claim_check.sqltext)
+    assert ASSET_RECOVERY_MAX_WINDOW.total_seconds() == 24 * 60 * 60
+    assert ASSET_RECOVERY_MAX_LEASE.total_seconds() == 5 * 60
+    assert ASSET_RECOVERY_LEASE_RENEWAL_INTERVAL.total_seconds() == 60
+    assert ASSET_RECOVERY_MAX_ATTEMPTS == 10
     assert {
         "uq_upload_intents_final_storage_version",
         "ix_upload_intents_expired_operation_lease",
         "ix_upload_intents_pending_cleanup",
+        "ix_upload_intents_recovery_due",
+        "ix_upload_intents_expired_recovery_lease",
     } <= {index.name for index in uploads.indexes}
 def test_asset_metadata_has_project_scoped_immutable_history_constraints() -> None:
     expected_tables = {

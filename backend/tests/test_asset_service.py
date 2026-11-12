@@ -165,6 +165,8 @@ def test_upload_intent_is_idempotent_and_fingerprint_conflicts_are_rejected() ->
     assert first is not None and first.created
     assert again is not None and not again.created
     assert again.intent.id == first.intent.id
+    assert first.intent.recovery_deadline_at == first.intent.expires_at + timedelta(hours=24)
+    assert first.intent.recovery_state == "not_required"
     assert session.get(ProjectAssetUsage, project.id).reserved_bytes == 400
     with pytest.raises(AssetIntentConflict):
         service.create_upload_intent(

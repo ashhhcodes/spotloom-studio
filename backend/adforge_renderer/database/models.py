@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -26,6 +26,18 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 PROJECT_NAME_MAX_LENGTH = 120  # Provisional engineering bound; not a numeric policy approval.
+ASSET_RECOVERY_MAX_WINDOW = timedelta(hours=24)  # Approved development default; not a production limit.
+ASSET_RECOVERY_MAX_LEASE = timedelta(minutes=5)  # Approved development default; not a production limit.
+ASSET_RECOVERY_LEASE_RENEWAL_INTERVAL = timedelta(seconds=60)  # Operational cadence, not a production limit.
+ASSET_RECOVERY_MAX_ATTEMPTS = 10  # Approved development default; not a production limit.
+
+
+def _default_recovery_deadline(context) -> datetime:
+    """Give a newly-created intent its fixed maximum development recovery window."""
+    expires_at = context.get_current_parameters().get("expires_at")
+    if not isinstance(expires_at, datetime) or expires_at.tzinfo is None:
+        raise ValueError("Upload-intent expiry must be timezone-aware.")
+    return expires_at + ASSET_RECOVERY_MAX_WINDOW
 
 
 def normalize_project_name(value: str) -> str:
@@ -215,6 +227,63 @@ class AssetUploadIntent(Base):
         CheckConstraint("operation_claim_generation >= 0", name="operation_claim_generation_nonnegative"),
         CheckConstraint("cleanup_claim_generation >= 0", name="cleanup_claim_generation_nonnegative"),
         CheckConstraint("cleanup_revision >= 0", name="cleanup_revision_nonnegative"),
+        CheckConstraint("recovery_revision >= 0", name="recovery_revision_nonnegative"),
+        CheckConstraint("recovery_claim_generation >= 0", name="recovery_claim_generation_nonnegative"),
+        CheckConstraint(
+            f"recovery_attempt_count >= 0 AND recovery_attempt_count <= {ASSET_RECOVERY_MAX_ATTEMPTS}",
+            name="recovery_attempt_count_bounded",
+        ),
+        CheckConstraint(
+            "recovery_state IN ('not_required', 'pending', 'claimed', 'completed', 'exhausted', 'manual')",
+            name="recovery_state_supported",
+        ),
+        CheckConstraint("recovery_deadline_at > expires_at", name="recovery_deadline_after_expiry"),
+        CheckConstraint(
+            "recovery_deadline_at <= expires_at + INTERVAL '24 hours'",
+            name="recovery_deadline_max_window",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "(recovery_state = 'claimed') = (recovery_claim_token IS NOT NULL)",
+            name="recovery_claim_state_consistent",
+        ),
+        CheckConstraint(
+            "(recovery_claim_token IS NULL) = (recovery_claimed_at IS NULL) AND "
+            "(recovery_claim_token IS NULL) = (recovery_lease_issued_at IS NULL) AND "
+            "(recovery_claim_token IS NULL) = (recovery_lease_expires_at IS NULL)",
+            name="recovery_claim_lease_consistent",
+        ),
+        CheckConstraint(
+            "recovery_lease_expires_at IS NULL OR "
+            "(recovery_lease_expires_at > recovery_lease_issued_at AND "
+            "recovery_lease_expires_at <= recovery_deadline_at)",
+            name="recovery_lease_bounded",
+        ),
+        CheckConstraint(
+            "recovery_claim_token IS NULL OR "
+            "(recovery_claim_generation > 0 AND recovery_attempt_count > 0)",
+            name="recovery_claim_generation_required",
+        ),
+        CheckConstraint(
+            "(recovery_state IN ('completed', 'exhausted', 'manual')) = "
+            "(recovery_finished_at IS NOT NULL)",
+            name="recovery_finished_state_consistent",
+        ),
+        CheckConstraint(
+            "recovery_outcome_code IS NULL OR "
+            "(recovery_state IN ('exhausted', 'manual') AND "
+            "recovery_outcome_code IN ('deadline_elapsed', 'attempts_exhausted', "
+            "'legacy_deadline_elapsed', 'legacy_ambiguous', 'permanent_failure'))",
+            name="recovery_outcome_code_supported",
+        ),
+        CheckConstraint(
+            "recovery_state NOT IN ('pending', 'claimed') OR "
+            "operation_state IN ('uploaded', 'finalizing')",
+            name="recovery_requires_completed_transfer",
+        ),
+        CheckConstraint(
+            "(operation_state = 'finalized') = (recovery_state = 'completed')",
+            name="recovery_finalized_consistent",
+        ),
         CheckConstraint(
             "cleanup_state IN ('not_required', 'pending', 'claimed', 'confirmed')",
             name="cleanup_state_supported",
@@ -255,12 +324,16 @@ class AssetUploadIntent(Base):
             name="cleanup_confirmation_consistent",
         ),
         CheckConstraint(
-            "(operation_state IN ('receiving', 'finalizing')) = (operation_claim_token IS NOT NULL)",
-            name="active_operation_claim_required",
+            "(operation_state = 'receiving') = (operation_claim_token IS NOT NULL)",
+            name="active_transfer_claim_required",
         ),
         CheckConstraint(
             "(observed_sha256_hex IS NULL) = (transfer_completed_at IS NULL)",
             name="transfer_observation_consistent",
+        ),
+        CheckConstraint(
+            "transfer_completed_at IS NULL OR transfer_completed_at <= expires_at",
+            name="transfer_completed_before_expiry",
         ),
         CheckConstraint(
             "observed_sha256_hex IS NULL OR (length(observed_sha256_hex) = 64 AND observed_sha256_hex = lower(observed_sha256_hex))",
@@ -326,6 +399,18 @@ class AssetUploadIntent(Base):
             sqlite_where=text("operation_lease_expires_at IS NOT NULL"),
         ),
         Index(
+            "ix_upload_intents_recovery_due",
+            "recovery_state", "recovery_deadline_at",
+            postgresql_where=text("recovery_state = 'pending'"),
+            sqlite_where=text("recovery_state = 'pending'"),
+        ),
+        Index(
+            "ix_upload_intents_expired_recovery_lease",
+            "recovery_state", "recovery_lease_expires_at",
+            postgresql_where=text("recovery_state = 'claimed'"),
+            sqlite_where=text("recovery_state = 'claimed'"),
+        ),
+        Index(
             "ix_upload_intents_pending_cleanup",
             "cleanup_state", "cleanup_lease_expires_at",
             postgresql_where=text("cleanup_state IN ('pending', 'claimed')"),
@@ -361,6 +446,22 @@ class AssetUploadIntent(Base):
     operation_claim_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     operation_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     operation_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Recovery claims are server-only and independent of upload byte acceptance.
+    recovery_deadline_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_default_recovery_deadline
+    )
+    recovery_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="not_required"
+    )
+    recovery_revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    recovery_claim_generation: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    recovery_claim_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    recovery_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    recovery_lease_issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    recovery_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    recovery_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    recovery_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    recovery_outcome_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
     observed_sha256_hex: Mapped[str | None] = mapped_column(String(64), nullable=True)
     transfer_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     final_storage_provider: Mapped[str | None] = mapped_column(String(80), nullable=True)
