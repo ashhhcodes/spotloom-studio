@@ -1063,6 +1063,104 @@ def test_upload_recovery_migration_backfills_legacy_states_and_refuses_unsafe_do
         engine.dispose()
 
 
+def test_upload_recovery_migration_refuses_legacy_transfer_completed_after_expiry() -> None:
+    """The migration must preserve history and refuse incompatible legacy data."""
+    try:
+        database_config = _local_disposable_test_config()
+    except ValueError as exc:
+        pytest.fail(str(exc))
+    if database_config is None:
+        pytest.skip("Set SPOTLOOM_TEST_DATABASE_URL to the disposable local spotloom_test database on port 5432.")
+
+    engine = create_engine(database_config.url, hide_parameters=True, pool_pre_ping=True)
+    schema = f"spotloom_recovery_expired_transfer_{uuid4().hex}"
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    intent_id = uuid4()
+    project_id = uuid4()
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
+        with engine.connect() as connection:
+            connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+            connection.commit()
+            config.attributes["connection"] = connection
+            command.upgrade(config, "20261112_0004_asset_upload_ops")
+            connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+            connection.commit()
+
+            owner_id, asset_id = uuid4(), uuid4()
+            connection.execute(text("INSERT INTO users (id) VALUES (:id)"), {"id": owner_id})
+            _insert_project(connection, owner_id, "Expired transfer migration fixture")
+            project_id = connection.scalar(
+                text("SELECT id FROM projects WHERE name = 'Expired transfer migration fixture'")
+            )
+            connection.execute(
+                text("INSERT INTO assets (id, project_id, kind) VALUES (:id, :project, 'audio')"),
+                {"id": asset_id, "project": project_id},
+            )
+            connection.execute(
+                text("""INSERT INTO project_asset_usage
+                    (project_id, quota_limit_bytes, used_bytes, reserved_bytes)
+                    VALUES (:project, 1000, 0, 100)"""),
+                {"project": project_id},
+            )
+            connection.execute(
+                text("""INSERT INTO asset_upload_intents
+                    (id, project_id, asset_id, idempotency_key, request_fingerprint,
+                     staging_reference, reserved_bytes, expires_at)
+                    VALUES (:id, :project, :asset, 'legacy-expired-completion', :fingerprint,
+                            'legacy-staging', 100, clock_timestamp() + INTERVAL '1 hour')"""),
+                {"id": intent_id, "project": project_id, "asset": asset_id,
+                 "fingerprint": "c" * 64},
+            )
+            connection.execute(
+                text("""UPDATE asset_upload_intents SET
+                    operation_state = 'receiving', operation_revision = operation_revision + 1,
+                    operation_claim_generation = operation_claim_generation + 1,
+                    operation_claim_token = :token, operation_claimed_at = clock_timestamp(),
+                    operation_lease_expires_at = expires_at - INTERVAL '1 second'
+                    WHERE id = :id"""),
+                {"id": intent_id, "token": uuid4()},
+            )
+            connection.execute(
+                text("""UPDATE asset_upload_intents SET
+                    operation_state = 'uploaded', operation_revision = operation_revision + 1,
+                    operation_claim_token = NULL, operation_claimed_at = NULL,
+                    operation_lease_expires_at = NULL, received_bytes = 16,
+                    observed_sha256_hex = :digest,
+                    transfer_completed_at = expires_at + INTERVAL '1 second'
+                    WHERE id = :id"""),
+                {"id": intent_id, "digest": "c" * 64},
+            )
+            connection.commit()
+
+            with pytest.raises(DBAPIError) as raised:
+                command.upgrade(config, "head")
+            assert "transfer_completed_at > expires_at" in str(raised.value.orig)
+            connection.rollback()
+            connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+            connection.commit()
+
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0004_asset_upload_ops"
+            assert "recovery_deadline_at" not in {
+                column["name"] for column in inspect(connection).get_columns("asset_upload_intents")
+            }
+            assert connection.scalar(
+                text("SELECT transfer_completed_at > expires_at FROM asset_upload_intents WHERE id = :id"),
+                {"id": intent_id},
+            ) is True
+            assert connection.scalar(
+                text("SELECT reserved_bytes FROM project_asset_usage WHERE project_id = :id"),
+                {"id": project_id},
+            ) == 100
+    finally:
+        config.attributes.pop("connection", None)
+        with engine.begin() as connection:
+            connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+            connection.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        engine.dispose()
+
+
 def test_recovery_lease_expiry_deadline_renewal_and_attempt_bounds_on_disposable_postgresql() -> None:
     """Exercise the recovery trigger using only a disposable isolated schema."""
     try:
@@ -1157,6 +1255,27 @@ def test_recovery_lease_expiry_deadline_renewal_and_attempt_bounds_on_disposable
 
             # The database allows server-side recovery after upload expiry, but
             # caps an individual claim and renewal at five minutes.
+            with pytest.raises(DBAPIError):
+                with connection.begin_nested():
+                    connection.execute(
+                        text("""UPDATE asset_upload_intents SET
+                            recovery_revision = recovery_revision + 1,
+                            recovery_claim_generation = recovery_claim_generation + 1,
+                            recovery_claim_token = :replacement,
+                            recovery_attempt_count = recovery_attempt_count + 1,
+                            recovery_lease_expires_at = clock_timestamp() + INTERVAL '1 minute'
+                            WHERE id = :id"""),
+                        {"id": intent_id, "replacement": uuid4()},
+                    )
+            original_claim = connection.execute(
+                text("""SELECT recovery_claim_token, recovery_claim_generation,
+                    recovery_attempt_count, recovery_revision,
+                    recovery_lease_expires_at > clock_timestamp()
+                    FROM asset_upload_intents WHERE id = :id"""),
+                {"id": intent_id},
+            ).one()
+            assert original_claim == (first_token, 1, 1, 2, True)
+
             with pytest.raises(DBAPIError):
                 with connection.begin_nested():
                     connection.execute(

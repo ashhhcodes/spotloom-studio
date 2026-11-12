@@ -22,8 +22,33 @@ _MAX_ATTEMPTS = 10
 
 
 def upgrade() -> None:
+    # Alembic runs this revision transactionally on PostgreSQL. Acquire the
+    # ACCESS EXCLUSIVE lock required by the ALTER TABLE work up front, before
+    # checking rows. It blocks row-locking readers and writers that could
+    # create a live legacy lease, and remains held through the backfill. Only
+    # asset_upload_intents is locked; no unrelated tables are affected.
+    op.execute("LOCK TABLE asset_upload_intents IN ACCESS EXCLUSIVE MODE")
+
+    # Revision 0004 allowed an observation to be recorded after intent expiry.
+    # Do not rewrite that historical timestamp to satisfy the new invariant.
+    # If this guard fails, inspect the affected IDs using the diagnostic query
+    # in the exception, resolve them manually, then retry the migration.
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM asset_upload_intents
+                WHERE transfer_completed_at > expires_at
+            ) THEN
+                RAISE EXCEPTION 'asset recovery migration found legacy transfers completed after expiry; inspect intent IDs with SELECT id FROM asset_upload_intents WHERE transfer_completed_at > expires_at and resolve manually before retrying';
+            END IF;
+        END $$
+        """
+    )
+
     # Do not migrate while a pre-recovery handler still owns an unexpired lease.
-    # Operators must quiesce writers and retry after the bounded old lease ends.
+    # The table lock above prevents a new claim from racing this preflight.
     op.execute(
         """
         DO $$
