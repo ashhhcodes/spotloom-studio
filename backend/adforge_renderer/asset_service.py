@@ -20,8 +20,10 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from adforge_renderer.asset_contract import PrivateObjectVersionReference
 from adforge_renderer.asset_repository import AssetRepository
 from adforge_renderer.asset_storage_provider import (
+    CleanupConfirmation,
     FinalizedObject,
     PrivateAssetStorage,
     TemporaryObjectReference,
@@ -121,6 +123,16 @@ class AssetService:
         if not isinstance(value, datetime) or value.tzinfo is None:
             raise ValueError("Asset service clock must return a timezone-aware datetime.")
         return value.astimezone(timezone.utc)
+
+    def _verify_cleanup_receipt(self, confirmation: CleanupConfirmation) -> None:
+        verifier = getattr(self.storage, "verify_cleanup_confirmation", None)
+        if (
+            type(confirmation) is not CleanupConfirmation
+            or confirmation.physically_absent is not True
+            or not callable(verifier)
+            or verifier(confirmation) is not True
+        ):
+            raise AssetCleanupNotConfirmed("A storage-authenticated cleanup receipt is required.")
 
     def _lock_usage(self, project_id: UUID) -> ProjectAssetUsage:
         """Create usage row race-safely, then serialize project accounting."""
@@ -468,6 +480,13 @@ class AssetService:
                 raise AssetOperationConflict("Previously completed upload state does not match verified storage.")
             return RecoveredUploadCompletion(intent, version, False)
 
+        # Logical deletion races recovery at this transaction boundary. The
+        # coordinator's pre-storage check is advisory only: deletion may commit
+        # while final storage verification is in progress. We hold usage, asset,
+        # and intent locks here, so this check also fences quota conversion.
+        if asset.deleted_at is not None:
+            raise AssetOperationConflict("A deleted asset cannot receive a recovered version.")
+
         if (
             intent.operation_state != "finalizing"
             or intent.state not in {"open", "expired"}
@@ -523,12 +542,12 @@ class AssetService:
         return RecoveredUploadCompletion(completed, version, True)
 
     def release_reservation_after_cleanup(
-        self, *, project_id: UUID, asset_id: UUID, intent_id: UUID, cleanup_confirmed: bool,
+        self, *, project_id: UUID, asset_id: UUID, intent_id: UUID,
+        confirmation: CleanupConfirmation,
     ) -> AssetUploadIntent | None:
-        if cleanup_confirmed is not True:
-            raise AssetCleanupNotConfirmed("Reservation remains until temporary bytes are confirmed removed.")
+        self._verify_cleanup_receipt(confirmation)
         usage = self._lock_usage(project_id)
-        self.session.scalar(
+        asset = self.session.scalar(
             select(Asset).where(Asset.project_id == project_id, Asset.id == asset_id).with_for_update()
         )
         intent = self.session.scalar(
@@ -540,6 +559,29 @@ class AssetService:
         )
         if intent is None:
             return None
+        expected_reference = TemporaryObjectReference(
+            intent.staging_reference, project_id, intent_id
+        )
+        if (
+            asset is None
+            or confirmation.target_kind != "temporary_upload"
+            or confirmation.cleanup_operation != "temporary_object_delete"
+            or confirmation.project_id != project_id
+            or confirmation.asset_id != asset_id
+            or confirmation.intent_id != intent_id
+            or confirmation.operation_id != intent_id
+            or confirmation.reference != expected_reference
+            or confirmation.claim_token != intent.cleanup_completed_claim_token
+            or confirmation.cleanup_revision != intent.cleanup_completed_revision
+            or confirmation.cleanup_generation != intent.cleanup_completed_claim_generation
+            or intent.cleanup_completed_claim_generation is None
+            or intent.cleanup_completed_claim_generation < 1
+            or intent.cleanup_state != "confirmed"
+            or intent.cleanup_confirmed_at is None
+            or intent.cleanup_claim_token is not None
+            or intent.cleanup_lease_expires_at is not None
+        ):
+            raise AssetCleanupNotConfirmed("Cleanup confirmation does not match the durable upload cleanup state.")
         if intent.state == "cancelled":
             return intent
         if intent.state not in {"expired", "failed"}:
@@ -585,17 +627,22 @@ class AssetService:
             return None
         if version.storage_state == "deleted":
             return version
+        if version.storage_state == "deletion_pending":
+            if version.cleanup_claim_token is None or version.cleanup_claim_generation < 1:
+                raise AssetOperationConflict("Version cleanup claim is incomplete.")
+            return version
         version.storage_state = "deletion_pending"
         version.state_revision += 1
+        version.cleanup_claim_generation += 1
+        version.cleanup_claim_token = uuid4()
         return version
 
     def confirm_version_removed(
         self, *, project_id: UUID, asset_id: UUID, version_id: UUID,
-        cleanup_confirmed: bool,
+        confirmation: CleanupConfirmation,
     ) -> AssetVersion | None:
         """Internal accounting callback after trusted storage confirms deletion."""
-        if cleanup_confirmed is not True:
-            raise AssetCleanupNotConfirmed("Used quota remains until physical removal is confirmed.")
+        self._verify_cleanup_receipt(confirmation)
         usage = self._lock_usage(project_id)
         asset = self.session.scalar(
             select(Asset).where(Asset.project_id == project_id, Asset.id == asset_id).with_for_update()
@@ -611,14 +658,49 @@ class AssetService:
         )
         if version is None:
             return None
+        try:
+            expected_reference = PrivateObjectVersionReference(
+                value=version.object_version_reference
+            )
+        except (TypeError, ValueError):
+            raise AssetCleanupNotConfirmed("Stored version reference is invalid.") from None
+        if (
+            confirmation.target_kind != "asset_version"
+            or confirmation.cleanup_operation != "finalized_object_delete"
+            or confirmation.project_id != project_id
+            or confirmation.asset_id != asset_id
+            or confirmation.intent_id != version.upload_intent_id
+            or confirmation.operation_id != version.upload_intent_id
+            or confirmation.reference != expected_reference
+            or type(confirmation.cleanup_revision) is not int
+            or confirmation.cleanup_revision < 1
+        ):
+            raise AssetCleanupNotConfirmed("Cleanup confirmation does not identify this exact asset version.")
         if version.storage_state == "deleted":
+            if (
+                version.cleanup_completed_claim_token != confirmation.claim_token
+                or version.cleanup_completed_claim_generation != confirmation.cleanup_generation
+                or version.cleanup_completed_revision != confirmation.cleanup_revision
+                or version.state_revision != confirmation.cleanup_revision + 1
+            ):
+                raise AssetCleanupNotConfirmed("Cleanup confirmation is stale.")
             return version
         if version.storage_state != "deletion_pending":
             raise AssetOperationConflict("Version cleanup must be claimed before removal is recorded.")
+        if (
+            confirmation.claim_token != version.cleanup_claim_token
+            or confirmation.cleanup_generation != version.cleanup_claim_generation
+            or version.state_revision != confirmation.cleanup_revision
+        ):
+            raise AssetCleanupNotConfirmed("Cleanup confirmation does not match the current cleanup revision.")
         if version.byte_size > usage.used_bytes:
             raise AssetOperationConflict("Project used-byte accounting is inconsistent.")
         version.storage_state = "deleted"
         version.physically_deleted_at = self._now()
+        version.cleanup_completed_claim_token = version.cleanup_claim_token
+        version.cleanup_completed_claim_generation = version.cleanup_claim_generation
+        version.cleanup_completed_revision = version.state_revision
+        version.cleanup_claim_token = None
         version.state_revision += 1
         self._adjust_usage(usage, used=-version.byte_size)
         return version

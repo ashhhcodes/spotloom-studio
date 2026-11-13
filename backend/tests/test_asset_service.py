@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -17,7 +18,7 @@ from adforge_renderer.asset_service import (
     AssetServiceConfig,
     AssetServiceConfigurationError,
 )
-from adforge_renderer.asset_storage_provider import TemporaryObjectReference
+from adforge_renderer.asset_storage_provider import CleanupConfirmation, TemporaryObjectReference
 from adforge_renderer.local_asset_storage import LocalAssetStorageConfig, LocalPrivateAssetStorage
 from adforge_renderer.database.models import (
     Asset,
@@ -336,9 +337,11 @@ def test_finalization_reconciliation_is_idempotent_and_uses_actual_bytes() -> No
     session.close()
 
 
-def test_expiry_retains_quota_until_cleanup_confirms_removal() -> None:
+def test_expiry_retains_quota_until_cleanup_confirms_removal(tmp_path) -> None:
     session = _sqlite_session()
     user, project, asset, service = _seed(session)
+    storage = LocalPrivateAssetStorage(LocalAssetStorageConfig(tmp_path / "private-assets"))
+    service.storage = storage
     result = service.create_upload_intent(
         project_id=project.id, asset_id=asset.id, owner_user_id=user.id,
         idempotency_key="expire", reserved_bytes=200, lifetime=timedelta(minutes=30),
@@ -347,6 +350,7 @@ def test_expiry_retains_quota_until_cleanup_confirms_removal() -> None:
     expired_service = AssetService(
         session, service.config,
         clock=lambda: datetime(2026, 11, 12, tzinfo=timezone.utc),
+        storage=storage,
     )
     expired = expired_service.expire_upload_intent(
         project_id=project.id, asset_id=asset.id, intent_id=result.intent.id
@@ -357,24 +361,73 @@ def test_expiry_retains_quota_until_cleanup_confirms_removal() -> None:
     with pytest.raises(AssetCleanupNotConfirmed):
         expired_service.release_reservation_after_cleanup(
             project_id=project.id, asset_id=asset.id, intent_id=result.intent.id,
-            cleanup_confirmed=False,
+            confirmation=True,  # type: ignore[arg-type]
         )
+    temporary = storage.allocate_temporary_reference(project_id=project.id, operation_id=result.intent.id)
+    result.intent.staging_reference = temporary.value
+    storage.create_temporary_object(temporary)
+    storage.write_temporary_object(temporary, [b"reserved upload"], max_bytes=128)
+    claim_token = uuid4()
+    result.intent.cleanup_state = "claimed"
+    result.intent.cleanup_revision = 2
+    result.intent.cleanup_claim_generation = 1
+    result.intent.cleanup_claim_token = claim_token
+    confirmation = storage.delete_temporary_object(
+        temporary, project_id=project.id, asset_id=asset.id, intent_id=result.intent.id,
+        claim_token=claim_token, cleanup_revision=result.intent.cleanup_revision,
+        cleanup_generation=result.intent.cleanup_claim_generation,
+    )
+    result.intent.cleanup_state = "confirmed"
+    result.intent.cleanup_revision += 1
+    result.intent.cleanup_claim_token = None
+    result.intent.cleanup_confirmed_at = datetime(2026, 11, 12, tzinfo=timezone.utc)
+    result.intent.cleanup_completed_claim_token = claim_token
+    result.intent.cleanup_completed_claim_generation = 1
+    result.intent.cleanup_completed_revision = 2
+    synthetic = CleanupConfirmation(
+        reference=temporary, physically_absent=True,
+        target_kind="temporary_upload", cleanup_operation="temporary_object_delete",
+        project_id=project.id, asset_id=asset.id, intent_id=result.intent.id,
+        operation_id=result.intent.id, claim_token=claim_token,
+        cleanup_revision=2, cleanup_generation=1,
+    )
+    with pytest.raises(AssetCleanupNotConfirmed):
+        expired_service.release_reservation_after_cleanup(
+            project_id=project.id, asset_id=asset.id, intent_id=result.intent.id,
+            confirmation=synthetic,
+        )
+    with pytest.raises(AssetCleanupNotConfirmed):
+        expired_service.release_reservation_after_cleanup(
+            project_id=project.id, asset_id=asset.id, intent_id=result.intent.id,
+            confirmation=replace(confirmation, project_id=uuid4()),
+        )
+    assert usage.reserved_bytes == 200
+    completed_token = result.intent.cleanup_completed_claim_token
+    result.intent.cleanup_completed_claim_token = uuid4()
+    with pytest.raises(AssetCleanupNotConfirmed):
+        expired_service.release_reservation_after_cleanup(
+            project_id=project.id, asset_id=asset.id, intent_id=result.intent.id,
+            confirmation=confirmation,
+        )
+    result.intent.cleanup_completed_claim_token = completed_token
     released = expired_service.release_reservation_after_cleanup(
         project_id=project.id, asset_id=asset.id, intent_id=result.intent.id,
-        cleanup_confirmed=True,
+        confirmation=confirmation,
     )
     assert released.state == "cancelled"
     assert usage.reserved_bytes == 0
     assert expired_service.release_reservation_after_cleanup(
         project_id=project.id, asset_id=asset.id, intent_id=result.intent.id,
-        cleanup_confirmed=True,
+        confirmation=confirmation,
     ) is released
     session.close()
 
 
-def test_logical_deletion_keeps_used_quota_until_version_removal_is_confirmed() -> None:
+def test_logical_deletion_keeps_used_quota_until_version_removal_is_confirmed(tmp_path) -> None:
     session = _sqlite_session()
     user, project, asset, service = _seed(session)
+    storage = LocalPrivateAssetStorage(LocalAssetStorageConfig(tmp_path / "private-assets"))
+    service.storage = storage
     intent_result = service.create_upload_intent(
         project_id=project.id, asset_id=asset.id, owner_user_id=user.id,
         idempotency_key="stored", reserved_bytes=250, lifetime=timedelta(minutes=30),
@@ -383,13 +436,21 @@ def test_logical_deletion_keeps_used_quota_until_version_removal_is_confirmed() 
         project_id=project.id, asset_id=asset.id,
         intent_id=intent_result.intent.id, actual_bytes=220,
     )
+    temporary = storage.allocate_temporary_reference(project_id=project.id, operation_id=intent.id)
+    storage.create_temporary_object(temporary)
+    observation = storage.write_temporary_object(temporary, [b"x" * 220], max_bytes=256)
+    object_version = storage.new_object_version_reference()
+    storage.finalize_temporary_object_preserving_temporary(
+        temporary, object_version, expected_sha256=observation.sha256,
+        expected_byte_size=observation.byte_size,
+    )
     version = AssetVersion(
         project_id=project.id,
         asset_id=asset.id,
         upload_intent_id=intent.id,
         storage_provider="local-test",
-        object_version_reference="opaque-version-1",
-        byte_size=220,
+        object_version_reference=object_version.value,
+        byte_size=observation.byte_size,
         detected_media_type="audio/wav",
         validation_state="quarantined",
         storage_state="present",
@@ -412,16 +473,28 @@ def test_logical_deletion_keeps_used_quota_until_version_removal_is_confirmed() 
     with pytest.raises(AssetCleanupNotConfirmed):
         service.confirm_version_removed(
             project_id=project.id, asset_id=asset.id, version_id=version.id,
-            cleanup_confirmed=False,
+            confirmation=True,  # type: ignore[arg-type]
         )
+    confirmation = storage.delete_finalized_object(
+        object_version, project_id=project.id, asset_id=asset.id,
+        intent_id=intent.id, claim_token=pending.cleanup_claim_token,
+        cleanup_revision=pending.state_revision,
+        cleanup_generation=pending.cleanup_claim_generation,
+    )
+    with pytest.raises(AssetCleanupNotConfirmed):
+        service.confirm_version_removed(
+            project_id=project.id, asset_id=asset.id, version_id=version.id,
+            confirmation=replace(confirmation, cleanup_revision=pending.state_revision + 1),
+        )
+    assert usage.used_bytes == 220
     removed = service.confirm_version_removed(
         project_id=project.id, asset_id=asset.id, version_id=version.id,
-        cleanup_confirmed=True,
+        confirmation=confirmation,
     )
     assert removed.storage_state == "deleted"
     assert usage.used_bytes == 0
     assert service.confirm_version_removed(
         project_id=project.id, asset_id=asset.id, version_id=version.id,
-        cleanup_confirmed=True,
+        confirmation=confirmation,
     ) is removed
     session.close()

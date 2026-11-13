@@ -30,6 +30,7 @@ from adforge_renderer.asset_service import (
     AssetServiceConfig,
 )
 from adforge_renderer.asset_storage_provider import TemporaryObjectReference
+from adforge_renderer.local_asset_storage import LocalAssetStorageConfig, LocalPrivateAssetStorage
 from sqlalchemy.orm import sessionmaker
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, local
@@ -286,7 +287,7 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                 "asset_validation_attempts", "asset_validation_evidence", "asset_evidence_revocations",
             }
             assert asset_tables <= set(inspect(connection).get_table_names())
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0007_asset_retry"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261113_0008_cleanup_receipt"
             assert all(
                 connection.scalar(text(f"SELECT count(*) FROM {table_name}")) == 0
                 for table_name in asset_tables
@@ -307,8 +308,17 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                 "final_object_version_reference", "finalization_started_at", "storage_finalized_at",
                 "cleanup_state", "cleanup_revision", "cleanup_claim_generation",
                 "cleanup_claim_token", "cleanup_claimed_at", "cleanup_lease_expires_at",
-                "cleanup_confirmed_at",
+                "cleanup_confirmed_at", "cleanup_completed_claim_token",
+                "cleanup_completed_claim_generation", "cleanup_completed_revision",
             } <= set(upload_columns)
+            version_columns = {
+                column["name"] for column in inspect(connection).get_columns("asset_versions")
+            }
+            assert {
+                "cleanup_claim_token", "cleanup_claim_generation",
+                "cleanup_completed_claim_token", "cleanup_completed_claim_generation",
+                "cleanup_completed_revision",
+            } <= version_columns
             recovery_deadline_column = next(
                 column for column in inspect(connection).get_columns("asset_upload_intents")
                 if column["name"] == "recovery_deadline_at"
@@ -384,6 +394,8 @@ def test_asset_migration_upgrades_and_downgrades_disposable_local_postgresql() -
                 )
             }
             assert trigger_names == {
+                    "trg_asset_cleanup_receipt_guard",
+                    "trg_asset_version_cleanup_receipt_guard",
                 "trg_asset_versions_immutable_identity",
                 "trg_assets_current_version_must_be_ready_insert",
                 "trg_assets_current_version_must_be_ready_update",
@@ -1053,7 +1065,7 @@ def test_upload_recovery_migration_backfills_legacy_states_and_refuses_unsafe_do
             command.upgrade(config, "head")
             connection.exec_driver_sql(f'SET search_path TO "{schema}"')
             connection.commit()
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0007_asset_retry"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261113_0008_cleanup_receipt"
             rows = {
                 row[0]: row[1:]
                 for row in connection.execute(text("""SELECT id, operation_state, recovery_state,
@@ -1088,7 +1100,7 @@ def test_upload_recovery_migration_backfills_legacy_states_and_refuses_unsafe_do
             connection.rollback()
             connection.exec_driver_sql(f'SET search_path TO "{schema}"')
             connection.commit()
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261112_0007_asset_retry"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261113_0008_cleanup_receipt"
     finally:
         config.attributes.pop("connection", None)
         with engine.begin() as connection:
@@ -1651,7 +1663,7 @@ def test_concurrent_first_identity_mapping_uses_unique_pair_on_disposable_postgr
         admin_engine.dispose()
 
 
-def test_asset_upload_intent_quota_concurrency_on_disposable_spotloom_test() -> None:
+def test_asset_upload_intent_quota_concurrency_on_disposable_spotloom_test(tmp_path: Path) -> None:
     """Verify per-project row locking serializes idempotency and quota races."""
     try:
         database_config = _local_disposable_test_config()
@@ -1688,6 +1700,7 @@ def test_asset_upload_intent_quota_concurrency_on_disposable_spotloom_test() -> 
         factory = sessionmaker(bind=worker_engine, autoflush=False, expire_on_commit=False)
         now = datetime.now(timezone.utc)
         config = AssetServiceConfig(1000, timedelta(hours=1))
+        storage = LocalPrivateAssetStorage(LocalAssetStorageConfig(tmp_path / "private-assets"))
         with factory.begin() as session:
             user = User()
             session.add(user)
@@ -1708,7 +1721,7 @@ def test_asset_upload_intent_quota_concurrency_on_disposable_spotloom_test() -> 
             with factory.begin() as session:
                 start.wait(timeout=10)
                 return AssetService(
-                    session, config, clock=lambda: now, storage=_ReferenceAllocator()
+                    session, config, clock=lambda: now, storage=storage
                 ).create_upload_intent(
                     project_id=project_id,
                     asset_id=asset_id,
@@ -1730,7 +1743,7 @@ def test_asset_upload_intent_quota_concurrency_on_disposable_spotloom_test() -> 
                 with factory.begin() as session:
                     race_barrier.wait(timeout=10)
                     result = AssetService(
-                        session, config, clock=lambda: now, storage=_ReferenceAllocator()
+                        session, config, clock=lambda: now, storage=storage
                     ).create_upload_intent(
                         project_id=project_id,
                         asset_id=asset_id,
@@ -1757,7 +1770,7 @@ def test_asset_upload_intent_quota_concurrency_on_disposable_spotloom_test() -> 
                     AssetUploadIntent.idempotency_key == "same-request",
                 )
             )
-            service = AssetService(session, config, clock=lambda: now)
+            service = AssetService(session, config, clock=lambda: now, storage=storage)
             finalized = service.reconcile_finalized_upload(
                 project_id=project_id,
                 asset_id=asset_id,
@@ -1788,19 +1801,87 @@ def test_asset_upload_intent_quota_concurrency_on_disposable_spotloom_test() -> 
                 session,
                 config,
                 clock=lambda: expiring.expires_at + timedelta(seconds=1),
+                storage=storage,
             )
-            late_service.expire_upload_intent(
+            expiring_id = expiring.id
+            expiring_at = expiring.expires_at
+            temp_reference = TemporaryObjectReference(
+                expiring.staging_reference, project_id, expiring.id
+            )
+            expired_intent = late_service.expire_upload_intent(
                 project_id=project_id, asset_id=asset_id, intent_id=expiring.id
             )
+            assert expired_intent is not None and expired_intent.state == "expired"
             assert usage.reserved_bytes == 400
+
+        # Do storage I/O outside database transactions and row locks.
+        storage.create_temporary_object(temp_reference)
+        storage.write_temporary_object(temp_reference, [b"expired transfer"], max_bytes=128)
+        claim_token = uuid4()
+        with factory.begin() as session:
+            session.execute(text("UPDATE asset_upload_intents SET cleanup_state = 'pending', "
+                                 "cleanup_revision = cleanup_revision + 1 WHERE id = :id"),
+                            {"id": expiring_id})
+            session.execute(text("UPDATE asset_upload_intents SET cleanup_state = 'claimed', "
+                                 "cleanup_revision = cleanup_revision + 1, "
+                                 "cleanup_claim_generation = cleanup_claim_generation + 1, "
+                                 "cleanup_claim_token = :token, cleanup_claimed_at = clock_timestamp(), "
+                                 "cleanup_lease_expires_at = clock_timestamp() + INTERVAL '1 minute' "
+                                 "WHERE id = :id"),
+                            {"id": expiring_id, "token": claim_token})
+            claim_revision = session.scalar(
+                text("SELECT cleanup_revision FROM asset_upload_intents WHERE id = :id"),
+                {"id": expiring_id},
+            )
+            assert claim_revision is not None
+            claim_generation = session.scalar(
+                text("SELECT cleanup_claim_generation FROM asset_upload_intents WHERE id = :id"),
+                {"id": expiring_id},
+            )
+            assert claim_token is not None and claim_generation == 1
+        confirmation = storage.delete_temporary_object(
+            temp_reference, project_id=project_id, asset_id=asset_id,
+            intent_id=expiring_id, claim_token=claim_token,
+            cleanup_revision=claim_revision, cleanup_generation=claim_generation,
+        )
+        with factory.begin() as session:
+            session.execute(text("UPDATE asset_upload_intents SET cleanup_state = 'confirmed', "
+                                 "cleanup_revision = cleanup_revision + 1, cleanup_claim_token = NULL, "
+                                 "cleanup_claimed_at = NULL, cleanup_lease_expires_at = NULL, "
+                                 "cleanup_confirmed_at = clock_timestamp() WHERE id = :id"),
+                            {"id": expiring_id})
+            expiring = session.get(AssetUploadIntent, expiring_id)
+            session.refresh(expiring)
+            assert expiring.state == "expired"
+            assert expiring.cleanup_completed_claim_token == claim_token
+            assert expiring.cleanup_completed_claim_generation == claim_generation
+            assert expiring.cleanup_completed_revision == claim_revision
+            late_service = AssetService(
+                session, config,
+                clock=lambda: expiring_at + timedelta(seconds=1),
+                storage=storage,
+            )
             late_service.release_reservation_after_cleanup(
                 project_id=project_id,
                 asset_id=asset_id,
-                intent_id=expiring.id,
-                cleanup_confirmed=True,
+                intent_id=expiring_id,
+                confirmation=confirmation,
             )
+            usage = session.get(ProjectAssetUsage, project_id)
             assert usage.reserved_bytes == 0
             assert usage.used_bytes == 250
+
+        with admin_engine.connect() as migration_connection:
+            migration_connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+            migration_connection.commit()
+            alembic_config.attributes["connection"] = migration_connection
+            with pytest.raises(RuntimeError, match="durable cleanup claim data exists"):
+                command.downgrade(alembic_config, "20261112_0007_asset_retry")
+            migration_connection.rollback()
+            migration_connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+            migration_connection.commit()
+            assert migration_connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261113_0008_cleanup_receipt"
+            migration_connection.commit()
     finally:
         if worker_engine is not None:
             worker_engine.dispose()

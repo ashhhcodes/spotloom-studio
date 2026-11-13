@@ -329,6 +329,14 @@ class AssetUploadIntent(Base):
             name="cleanup_confirmation_consistent",
         ),
         CheckConstraint(
+            "(cleanup_completed_claim_token IS NULL) = "
+            "(cleanup_completed_claim_generation IS NULL) AND "
+            "(cleanup_completed_claim_token IS NULL) = (cleanup_completed_revision IS NULL) AND "
+            "(cleanup_completed_claim_generation IS NULL OR cleanup_completed_claim_generation > 0) AND "
+            "(cleanup_completed_revision IS NULL OR cleanup_completed_revision >= 0)",
+            name="cleanup_completed_claim_state_consistent",
+        ),
+        CheckConstraint(
             "(operation_state = 'receiving') = (operation_claim_token IS NOT NULL)",
             name="active_transfer_claim_required",
         ),
@@ -486,6 +494,9 @@ class AssetUploadIntent(Base):
     cleanup_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cleanup_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cleanup_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cleanup_completed_claim_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    cleanup_completed_claim_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cleanup_completed_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -506,6 +517,27 @@ class AssetVersion(Base):
         CheckConstraint("storage_state IN ('present', 'deletion_pending', 'deleted', 'missing')", name="storage_state_supported"),
         CheckConstraint("(storage_state = 'deleted') = (physically_deleted_at IS NOT NULL)", name="physical_delete_timestamp_consistent"),
         CheckConstraint("state_revision >= 0", name="revision_nonnegative"),
+        CheckConstraint("cleanup_claim_generation >= 0", name="cleanup_claim_generation_nonnegative"),
+        CheckConstraint(
+            "cleanup_claim_token IS NULL OR cleanup_claim_generation > 0",
+            name="cleanup_claim_generation_required",
+        ),
+        CheckConstraint(
+            "cleanup_claim_token IS NULL OR storage_state = 'deletion_pending'",
+            name="cleanup_claim_requires_pending_state",
+        ),
+        CheckConstraint(
+            "(cleanup_completed_claim_token IS NULL) = "
+            "(cleanup_completed_claim_generation IS NULL) AND "
+            "(cleanup_completed_claim_token IS NULL) = (cleanup_completed_revision IS NULL) AND "
+            "(cleanup_completed_claim_generation IS NULL OR cleanup_completed_claim_generation > 0) AND "
+            "(cleanup_completed_revision IS NULL OR cleanup_completed_revision >= 0)",
+            name="cleanup_completed_claim_pair_consistent",
+        ),
+        CheckConstraint(
+            "cleanup_completed_claim_token IS NULL OR storage_state = 'deleted'",
+            name="cleanup_completed_claim_requires_deleted_state",
+        ),
         CheckConstraint("(validation_state = 'ready') = (accepted_evidence_id IS NOT NULL)", name="ready_requires_evidence"),
         CheckConstraint("finalized_at IS NOT NULL", name="version_finalized"),
         Index("ix_asset_versions_asset_created", "project_id", "asset_id", "created_at"),
@@ -548,6 +580,11 @@ class AssetVersion(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     physically_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cleanup_claim_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    cleanup_claim_generation: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    cleanup_completed_claim_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    cleanup_completed_claim_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cleanup_completed_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class AssetValidationAttempt(Base):

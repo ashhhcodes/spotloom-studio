@@ -172,12 +172,15 @@ def test_initial_metadata_has_required_keys_constraints_and_indexes() -> None:
     assert projects.c.updated_at.onupdate is not None
 
 
-def test_alembic_has_one_discoverable_asset_retry_head() -> None:
+def test_alembic_has_one_discoverable_cleanup_receipt_head() -> None:
     backend_dir = Path(__file__).resolve().parents[1]
     config = Config(str(backend_dir / "alembic.ini"))
     scripts = ScriptDirectory.from_config(config)
 
-    assert scripts.get_current_head() == "20261112_0007_asset_retry"
+    assert scripts.get_current_head() == "20261113_0008_cleanup_receipt"
+    cleanup_revision = scripts.get_revision("20261113_0008_cleanup_receipt")
+    assert cleanup_revision is not None
+    assert cleanup_revision.down_revision == "20261112_0007_asset_retry"
     retry_revision = scripts.get_revision("20261112_0007_asset_retry")
     assert retry_revision is not None
     assert retry_revision.down_revision == "20261112_0006_asset_names"
