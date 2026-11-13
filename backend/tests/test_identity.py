@@ -31,7 +31,6 @@ _public_key = _private_key.public_key().public_bytes(
     serialization.PublicFormat.SubjectPublicKeyInfo,
 ).decode("ascii")
 _other_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-_now = datetime.now(timezone.utc)
 
 
 def config(*, public_key: str = _public_key) -> ClerkVerificationConfig:
@@ -50,10 +49,14 @@ def token(
     subject: str = "user_test_subject",
     audience: str = AUDIENCE,
     authorized_party: str = PARTY,
-    expires_at: datetime = _now + timedelta(minutes=2),
-    not_before: datetime = _now - timedelta(seconds=1),
-    issued_at: datetime = _now,
+    expires_at: datetime | None = None,
+    not_before: datetime | None = None,
+    issued_at: datetime | None = None,
 ) -> str:
+    now = datetime.now(timezone.utc)
+    expires_at = expires_at if expires_at is not None else now + timedelta(minutes=2)
+    not_before = not_before if not_before is not None else now - timedelta(seconds=1)
+    issued_at = issued_at if issued_at is not None else now
     claims = {
         "iss": issuer,
         "sub": subject,
@@ -147,7 +150,7 @@ def test_issuer_rejection_logs_fixed_category(caplog) -> None:
 
 
 def test_expired_token_is_unauthorized() -> None:
-    expired = token(expires_at=_now - timedelta(seconds=30))
+    expired = token(expires_at=datetime.now(timezone.utc) - timedelta(seconds=30))
     with make_client(fixed_config=config()) as client:
         response = client.get("/protected", headers={"Authorization": f"Bearer {expired}"})
 
@@ -188,7 +191,7 @@ def test_wrong_configured_audience_is_rejected() -> None:
 
 
 def test_future_not_before_token_is_unauthorized() -> None:
-    not_active = token(not_before=_now + timedelta(minutes=1))
+    not_active = token(not_before=datetime.now(timezone.utc) + timedelta(minutes=5))
     with make_client(fixed_config=config()) as client:
         response = client.get("/protected", headers={"Authorization": f"Bearer {not_active}"})
 
