@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 from uuid import uuid4
 
 import pytest
@@ -33,6 +33,7 @@ from adforge_renderer.database.models import (
 )
 from adforge_renderer.asset_contract import PrivateObjectVersionReference
 from adforge_renderer.asset_service import AssetOperationConflict, AssetService, AssetServiceConfig
+from adforge_renderer.asset_storage_provider import FinalizedObject
 from adforge_renderer.local_asset_storage import LocalAssetStorageConfig, LocalPrivateAssetStorage
 
 
@@ -934,6 +935,128 @@ def test_recovered_upload_completion_is_atomic_idempotent_and_keeps_asset_quaran
             ) == duplicate.version.id
             session.commit()
         assert storage.inspect_temporary_object(temporary).complete
+    finally:
+        if config is not None and connection is not None:
+            _cleanup_schema(engine, schema, config, connection)
+        else:
+            engine.dispose()
+
+
+def test_asset_deletion_racing_recovery_completion_blocks_version_and_quota_conversion() -> None:
+    engine, schema = _test_engine_and_schema("delete-completion-race")
+    config = None
+    connection = None
+    try:
+        config, connection = _prepare_schema(engine, schema)
+        project_id, asset_id, intent_id, owner_id = _seed_pending_intent(
+            connection, "delete-completion-race"
+        )
+        connection.execute(
+            text("UPDATE project_asset_usage SET reserved_bytes = 100 WHERE project_id = :project"),
+            {"project": project_id},
+        )
+        connection.commit()
+        version_reference = PrivateObjectVersionReference(value=f"ver_{uuid4().hex}")
+        with Session(connection, autoflush=False, expire_on_commit=False) as session:
+            claim = AssetRecoveryRepository(session).claim_next()
+            assert claim is not None and claim.intent_id == intent_id
+            begun = AssetRecoveryRepository(session).begin_finalization(
+                intent_id, claim.fence, storage_provider="local-private",
+                object_version_reference=version_reference,
+            )
+            assert begun is not None
+            session.commit()
+
+        finalized = FinalizedObject(
+            object_version=version_reference, byte_size=32, sha256="a" * 64,
+            temporary_cleanup_confirmed=False, project_id=project_id,
+            operation_id=intent_id, temporary_preserved=True,
+        )
+        worker_pid_ready = Event()
+        worker_pids: list[int] = []
+
+        def complete_after_delete() -> str:
+            with engine.connect() as worker_connection:
+                worker_connection.exec_driver_sql(f'SET search_path TO "{schema}"')
+                worker_connection.commit()
+                worker_pid = worker_connection.scalar(text("SELECT pg_backend_pid()"))
+                worker_connection.commit()
+                with Session(worker_connection, autoflush=False, expire_on_commit=False) as worker_session:
+                    worker_pids.append(worker_pid)
+                    worker_pid_ready.set()
+                    try:
+                        AssetService(
+                            worker_session,
+                            AssetServiceConfig(100_000, timedelta(hours=1)),
+                        ).complete_recovered_upload(
+                            project_id=project_id, asset_id=asset_id, intent_id=intent_id,
+                            storage_provider="local-private", finalized_object=finalized,
+                            fence=claim.fence,
+                        )
+                        worker_session.commit()
+                        return "completed"
+                    except AssetOperationConflict:
+                        worker_session.rollback()
+                        return "rejected_deleted_asset"
+
+        with Session(connection, autoflush=False, expire_on_commit=False) as deleting_session:
+            deleting_pid = connection.scalar(text("SELECT pg_backend_pid()"))
+            deleting_session.execute(
+                text("SELECT project_id FROM project_asset_usage WHERE project_id = :project FOR UPDATE"),
+                {"project": project_id},
+            ).one()
+            deleting_session.execute(
+                text("SELECT id FROM assets WHERE id = :asset FOR UPDATE"), {"asset": asset_id}
+            ).one()
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(complete_after_delete)
+                assert worker_pid_ready.wait(5)
+                worker_pid = worker_pids[0]
+                # Prove PostgreSQL is actually blocking the recovery worker on
+                # the usage-row lock held by this deletion transaction. A
+                # pre-call event alone cannot establish that the worker made
+                # it to the database lock boundary.
+                lock_wait_deadline = time.monotonic() + 10
+                observed_block = False
+                while time.monotonic() < lock_wait_deadline:
+                    with engine.connect() as observer:
+                        result = observer.execute(
+                            text("""SELECT wait_event_type = 'Lock'
+                                AND :blocker = ANY(pg_blocking_pids(pid))
+                                FROM pg_stat_activity WHERE pid = :worker"""),
+                            {"blocker": deleting_pid, "worker": worker_pid},
+                        ).scalar_one_or_none()
+                        observer.commit()
+                    if result is True:
+                        observed_block = True
+                        break
+                    time.sleep(0.01)
+                deleted = AssetService(
+                    deleting_session,
+                    AssetServiceConfig(100_000, timedelta(hours=1)),
+                ).mark_asset_deleted(
+                    project_id=project_id, asset_id=asset_id, owner_user_id=owner_id
+                )
+                assert deleted is not None and deleted.deleted_at is not None
+                deleting_session.commit()
+                # Session is bound to a caller-owned Connection transaction;
+                # commit that outer transaction too, releasing the PostgreSQL
+                # row lock only after the tombstone is durable.
+                connection.commit()
+                outcome = future.result(timeout=15)
+                assert observed_block, "PostgreSQL did not show recovery blocked by the deletion lock"
+                assert outcome == "rejected_deleted_asset"
+
+        with Session(connection, autoflush=False, expire_on_commit=False) as verify_session:
+            assert verify_session.scalar(
+                select(AssetVersion.id).where(AssetVersion.upload_intent_id == intent_id)
+            ) is None
+            usage = verify_session.execute(
+                text("SELECT used_bytes, reserved_bytes FROM project_asset_usage WHERE project_id = :project"),
+                {"project": project_id},
+            ).one()
+            assert usage == (0, 100)
+            verify_session.commit()
     finally:
         if config is not None and connection is not None:
             _cleanup_schema(engine, schema, config, connection)
