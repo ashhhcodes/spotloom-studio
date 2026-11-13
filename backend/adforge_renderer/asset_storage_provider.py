@@ -6,7 +6,7 @@ asset readiness, or production storage guarantees.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import BinaryIO, Iterable, Protocol
 from uuid import UUID
 
@@ -117,10 +117,20 @@ class FinalizedObject:
 
 @dataclass(frozen=True, slots=True)
 class CleanupConfirmation:
-    """Returned only after the explicitly named object is physically absent."""
+    """Storage-authenticated receipt for one exact durable cleanup claim."""
 
     reference: TemporaryObjectReference | PrivateObjectVersionReference
     physically_absent: bool
+    target_kind: str | None = None
+    cleanup_operation: str | None = None
+    project_id: UUID | None = None
+    asset_id: UUID | None = None
+    intent_id: UUID | None = None
+    operation_id: UUID | None = None
+    claim_token: UUID | None = None
+    cleanup_revision: int | None = None
+    cleanup_generation: int | None = None
+    proof: bytes = field(default=b"", repr=False, compare=False)
 
 
 class PrivateAssetStorage(Protocol):
@@ -175,9 +185,23 @@ class PrivateAssetStorage(Protocol):
     ) -> BinaryIO: ...
 
     def delete_temporary_object(
-        self, reference: TemporaryObjectReference, /
+        self, reference: TemporaryObjectReference, /, *,
+        project_id: UUID | None = None,
+        asset_id: UUID | None = None,
+        intent_id: UUID | None = None,
+        claim_token: UUID | None = None,
+        cleanup_revision: int | None = None,
+        cleanup_generation: int | None = None,
     ) -> CleanupConfirmation: ...
 
     def delete_finalized_object(
-        self, object_version: PrivateObjectVersionReference, /
+        self, object_version: PrivateObjectVersionReference, /, *,
+        project_id: UUID,
+        asset_id: UUID,
+        intent_id: UUID,
+        claim_token: UUID,
+        cleanup_revision: int,
+        cleanup_generation: int,
     ) -> CleanupConfirmation: ...
+
+    def verify_cleanup_confirmation(self, confirmation: CleanupConfirmation, /) -> bool: ...

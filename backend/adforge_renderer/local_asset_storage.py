@@ -3,21 +3,31 @@
 This module is deliberately independent of HTTP, SQLAlchemy, project ownership,
 and media validation. The configured directory must be private and must not be
 served by another process. It is not a production storage guarantee.
+
+Cooperating processes coordinate with Windows byte-range locks or POSIX flock
+on persistent per-object lock files. Correctness assumes a local filesystem
+with those kernel lock and atomic hard-link semantics; network filesystems are
+not supported. Lock files, tombstones, and the private cleanup-receipt key are
+retained so process crashes cannot silently erase fencing state.
 """
 
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import errno
 import hashlib
+import hmac
+import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import struct
 import subprocess
 import sys
+from contextlib import contextmanager
 from collections.abc import Iterable, Mapping
 from typing import BinaryIO
 from uuid import UUID, uuid4
@@ -59,6 +69,7 @@ _TEMP_BINDING_MAGIC = b"SLP1"
 _FINAL_MAGIC_V2 = b"SLV2"
 _FINAL_MAGIC_V3 = b"SLV3"
 _ROOT_MARKER = ".spotloom-private-storage-v1"
+_LOCKS_DIR = "temporary-locks"
 _REPARSE_POINT = 0x400
 _PROTECTED_WEB_DIRS = {"public", "static", "www", "wwwroot", "htdocs", "httpdocs"}
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -127,6 +138,34 @@ def _identity(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
 
+def _cleanup_confirmation_payload(confirmation: CleanupConfirmation) -> bytes:
+    reference = confirmation.reference
+    if type(reference) is TemporaryObjectReference:
+        reference_data = {
+            "type": "temporary", "value": reference.value,
+            "project_id": reference.project_id.hex if reference.project_id else None,
+            "operation_id": reference.operation_id.hex if reference.operation_id else None,
+        }
+    elif type(reference) is PrivateObjectVersionReference:
+        reference_data = {"type": "version", "value": reference.value}
+    else:
+        raise StorageCleanupNotConfirmed()
+    payload = {
+        "reference": reference_data,
+        "physically_absent": confirmation.physically_absent,
+        "target_kind": confirmation.target_kind,
+        "cleanup_operation": confirmation.cleanup_operation,
+        "project_id": confirmation.project_id.hex if confirmation.project_id else None,
+        "asset_id": confirmation.asset_id.hex if confirmation.asset_id else None,
+        "intent_id": confirmation.intent_id.hex if confirmation.intent_id else None,
+        "operation_id": confirmation.operation_id.hex if confirmation.operation_id else None,
+        "claim_token": confirmation.claim_token.hex if confirmation.claim_token else None,
+        "cleanup_revision": confirmation.cleanup_revision,
+        "cleanup_generation": confirmation.cleanup_generation,
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+
+
 class LocalPrivateAssetStorage:
     """Private local adapter using exclusive files and create-only hard links.
 
@@ -167,9 +206,11 @@ class LocalPrivateAssetStorage:
 
             temporary = root / "temporary"
             versions = root / "versions"
+            locks = root / _LOCKS_DIR
             temporary.mkdir(mode=0o700, exist_ok=True)
             versions.mkdir(mode=0o700, exist_ok=True)
-            for directory in (root, temporary, versions):
+            locks.mkdir(mode=0o700, exist_ok=True)
+            for directory in (root, temporary, versions, locks):
                 info = directory.lstat()
                 if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
                     raise ValueError
@@ -179,10 +220,13 @@ class LocalPrivateAssetStorage:
             self.__root = root
             self.__temporary = temporary
             self.__versions = versions
+            self.__locks = locks
             self.__root_identity = _identity(root.lstat())
             self.__temporary_identity = _identity(temporary.lstat())
             self.__versions_identity = _identity(versions.lstat())
+            self.__locks_identity = _identity(locks.lstat())
             self._verify_layout()
+            self.__cleanup_confirmation_key = self._load_cleanup_confirmation_key()
         except StorageConfigurationError:
             raise
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
@@ -231,6 +275,7 @@ class LocalPrivateAssetStorage:
             (self.__root, self.__root_identity),
             (self.__temporary, self.__temporary_identity),
             (self.__versions, self.__versions_identity),
+            (self.__locks, self.__locks_identity),
         )
         try:
             for path, expected_identity in expected:
@@ -246,6 +291,78 @@ class LocalPrivateAssetStorage:
         except (OSError, ValueError):
             raise StorageIOFailure() from None
 
+    def _load_cleanup_confirmation_key(self) -> bytes:
+        """Load a stable private key so receipts remain verifiable after restart."""
+        self._verify_layout()
+        path = self.__root / ".cleanup-receipt-key-v1"
+        try:
+            try:
+                fd = os.open(
+                    path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+            except FileExistsError:
+                fd = -1
+            if fd >= 0:
+                key = secrets.token_bytes(32)
+                try:
+                    with os.fdopen(fd, "wb") as stream:
+                        if stream.write(key) != len(key):
+                            raise OSError
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                except OSError:
+                    raise StorageConfigurationError() from None
+            self._verify_layout()
+            info = self._lstat_regular(path)
+            assert info is not None
+            if info.st_size != 32:
+                raise StorageConfigurationError()
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            read_fd = os.open(path, flags)
+            try:
+                opened = os.fstat(read_fd)
+                if not stat.S_ISREG(opened.st_mode) or _identity(opened) != _identity(info):
+                    raise StorageConfigurationError()
+                with os.fdopen(read_fd, "rb", closefd=False) as stream:
+                    key = stream.read(33)
+            finally:
+                os.close(read_fd)
+            self._verify_layout()
+            if len(key) != 32:
+                raise StorageConfigurationError()
+            return key
+        except StorageConfigurationError:
+            raise
+        except (OSError, ValueError):
+            raise StorageConfigurationError() from None
+
+    def _issue_cleanup_confirmation(self, **values) -> CleanupConfirmation:
+        confirmation = CleanupConfirmation(**values)
+        proof = hmac.new(
+            self.__cleanup_confirmation_key,
+            _cleanup_confirmation_payload(confirmation),
+            hashlib.sha256,
+        ).digest()
+        return replace(confirmation, proof=proof)
+
+    def verify_cleanup_confirmation(self, confirmation: CleanupConfirmation, /) -> bool:
+        if type(confirmation) is not CleanupConfirmation or confirmation.physically_absent is not True:
+            return False
+        if type(confirmation.proof) is not bytes or len(confirmation.proof) != hashlib.sha256().digest_size:
+            return False
+        try:
+            expected = hmac.new(
+                self.__cleanup_confirmation_key,
+                _cleanup_confirmation_payload(confirmation),
+                hashlib.sha256,
+            ).digest()
+        except (TypeError, ValueError, AttributeError):
+            return False
+        return hmac.compare_digest(expected, confirmation.proof)
+
     @staticmethod
     def _validate_temporary(reference: object) -> str:
         if type(reference) is not TemporaryObjectReference or not isinstance(reference.value, str):
@@ -260,6 +377,132 @@ class LocalPrivateAssetStorage:
             ):
                 raise StorageInvalidReference()
         return reference.value
+
+    @contextmanager
+    def _temporary_guard(self, value: str, *, cleanup: bool = False):
+        """Acquire a cross-process lock for one temp reference.
+
+        Lock files live outside the removable object directory and are never
+        unlinked. Windows uses a byte-range lock; POSIX uses flock. Both are
+        kernel-managed and released on process death. Contention fails closed.
+        """
+        with self._object_guard(f"{value}.lock", f"{value}.deleted", cleanup=cleanup):
+            yield
+
+    @contextmanager
+    def _version_guard(self, value: str, *, cleanup: bool = False):
+        version_id = value.removeprefix("ver_")
+        with self._object_guard(
+            f"version-{version_id}.lock", f"version-{version_id}.deleted", cleanup=cleanup
+        ):
+            yield
+
+    @contextmanager
+    def _object_guard(self, lock_name: str, tombstone_name: str, *, cleanup: bool = False):
+        self._verify_layout()
+        lock_path = self.__locks / lock_name
+        tombstone = self.__locks / tombstone_name
+        fd = -1
+        acquired = False
+        try:
+            try:
+                fd = os.open(
+                    lock_path,
+                    os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError
+                path_info = self._lstat_regular(lock_path)
+                assert path_info is not None
+                if _identity(info) != _identity(path_info):
+                    raise ValueError
+                if os.name == "nt":
+                    import msvcrt
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")
+                    os.fsync(fd)
+                # A replaced lock directory could make this process hold a
+                # lock different from the one other adapter instances use.
+                # Revalidate the directory and the opened lock inode after
+                # acquisition, before any caller can touch an object.
+                self._verify_layout()
+                current_lock = self._lstat_regular(lock_path)
+                if current_lock is None or _identity(os.fstat(fd)) != _identity(current_lock):
+                    raise ValueError
+                if not cleanup and self._lstat_regular(tombstone, missing_ok=True) is not None:
+                    raise StorageObjectConflict()
+            except StorageObjectConflict:
+                raise
+            except (OSError, ValueError, ImportError):
+                if cleanup:
+                    raise StorageCleanupNotConfirmed() from None
+                raise StorageObjectIncomplete() from None
+            yield
+            self._verify_layout()
+            current_lock = self._lstat_regular(lock_path)
+            if current_lock is None or _identity(os.fstat(fd)) != _identity(current_lock):
+                raise StorageIOFailure()
+        finally:
+            if fd >= 0:
+                try:
+                    if acquired:
+                        if os.name == "nt":
+                            import msvcrt
+                            os.lseek(fd, 0, os.SEEK_SET)
+                            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                        else:
+                            import fcntl
+                            fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                os.close(fd)
+
+    def _mark_deleted(self, name: str, marker: bytes) -> None:
+        """Permanently fence recreation after cleanup starts."""
+        self._verify_layout()
+        path = self.__locks / name
+        try:
+            try:
+                fd = os.open(
+                    path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+            except FileExistsError:
+                if self._read_marker(path, len(marker)) != marker:
+                    raise StorageCleanupNotConfirmed()
+                return
+            with os.fdopen(fd, "wb") as stream:
+                if stream.write(marker) != len(marker):
+                    raise StorageCleanupNotConfirmed()
+                stream.flush()
+                os.fsync(stream.fileno())
+            self._verify_layout()
+            if self._read_marker(path, len(marker)) != marker:
+                raise StorageCleanupNotConfirmed()
+        except AssetStorageError:
+            raise
+        except OSError:
+            raise StorageCleanupNotConfirmed() from None
+
+    def _mark_temporary_deleted(self, value: str) -> None:
+        self._mark_deleted(f"{value}.deleted", b"Spotloom temporary object deleted v1\n")
+
+    def _mark_version_deleted(self, value: str) -> None:
+        version_id = value.removeprefix("ver_")
+        self._mark_deleted(
+            f"version-{version_id}.deleted", b"Spotloom finalized version deleted v1\n"
+        )
 
     @staticmethod
     def _bound_temporary_value(project_id: UUID, operation_id: UUID) -> str:
@@ -318,13 +561,20 @@ class LocalPrivateAssetStorage:
     def create_temporary_object(
         self, reference: TemporaryObjectReference | None = None, /
     ) -> TemporaryObjectReference:
-        self._verify_layout()
         if reference is None:
             value = f"tmp_{uuid4().hex}"
             bound_reference = TemporaryObjectReference(value)
         else:
             value = self._validate_temporary(reference)
             bound_reference = reference
+        with self._temporary_guard(value):
+            return self._create_temporary_object_locked(bound_reference)
+
+    def _create_temporary_object_locked(
+        self, bound_reference: TemporaryObjectReference
+    ) -> TemporaryObjectReference:
+        value = self._validate_temporary(bound_reference)
+        self._verify_layout()
         directory = self.__temporary / value
         created = False
         try:
@@ -483,6 +733,19 @@ class LocalPrivateAssetStorage:
         return TransferObservation(count, digest.hexdigest())
 
     def write_temporary_object(
+        self,
+        reference: TemporaryObjectReference,
+        chunks: Iterable[bytes],
+        *,
+        max_bytes: int,
+    ) -> TransferObservation:
+        value = self._validate_temporary(reference)
+        with self._temporary_guard(value):
+            return self._write_temporary_object_locked(
+                reference, chunks, max_bytes=max_bytes
+            )
+
+    def _write_temporary_object_locked(
         self,
         reference: TemporaryObjectReference,
         chunks: Iterable[bytes],
@@ -713,6 +976,86 @@ class LocalPrivateAssetStorage:
         preserve_temporary: bool,
     ) -> FinalizedObject:
         temp_key = self._validate_temporary(temporary)
+        version_key = self._validate_version(object_version)
+        # Let the locked method inspect a tombstone so it can allow only an
+        # exact already-existing finalized object; it never creates after one.
+        with self._temporary_guard(temp_key, cleanup=True):
+            with self._version_guard(version_key):
+                tombstoned = self._lstat_regular(
+                    self.__locks / f"{temp_key}.deleted", missing_ok=True
+                ) is not None
+                if tombstoned:
+                    # Cleanup permanently fences new finalization. A retry is
+                    # allowed only to verify an exact already-created V3
+                    # object; it never creates or repairs the finalized pair.
+                    try:
+                        observed, operation_bytes, project_bytes, _object_path, manifest_path = self._inspect_final(
+                            object_version
+                        )
+                    except StorageObjectMissing:
+                        raise StorageObjectConflict() from None
+                    manifest_info = self._lstat_regular(manifest_path)
+                    expected_operation = (
+                        temporary.operation_id.bytes
+                        if temporary.operation_id is not None
+                        else UUID(hex=temp_key.removeprefix("tmp_")).bytes
+                    )
+                    if (
+                        manifest_info is None
+                        or (temporary.project_id is not None and manifest_info.st_size != _FINAL_META_V3.size)
+                        or project_bytes != (temporary.project_id.bytes if temporary.project_id else None)
+                        or operation_bytes != expected_operation
+                        or observed.byte_size != expected_byte_size
+                        or observed.sha256 != expected_sha256
+                    ):
+                        raise StorageObjectConflict()
+                    temp_dir = self.__temporary / temp_key
+                    try:
+                        self._verify_directory(temp_dir)
+                        temp_exists = True
+                    except StorageObjectMissing:
+                        temp_exists = False
+                    cleanup_confirmed = not temp_exists
+                    if temp_exists and not preserve_temporary:
+                        try:
+                            self._delete_temporary_object_locked(temporary)
+                            cleanup_confirmed = True
+                            temp_exists = False
+                        except (StorageCleanupNotConfirmed, StorageIOFailure, StorageInvalidReference):
+                            cleanup_confirmed = False
+                    return FinalizedObject(
+                        object_version=object_version,
+                        byte_size=observed.byte_size,
+                        sha256=observed.sha256,
+                        temporary_cleanup_confirmed=cleanup_confirmed,
+                        project_id=temporary.project_id,
+                        operation_id=temporary.operation_id,
+                        temporary_preserved=temp_exists,
+                    )
+                version_tombstoned = self._lstat_regular(
+                    self.__locks / f"version-{version_key.removeprefix('ver_')}.deleted",
+                    missing_ok=True,
+                ) is not None
+                if version_tombstoned:
+                    raise StorageObjectConflict()
+                return self._finalize_temporary_object_locked(
+                    temporary,
+                    object_version,
+                    expected_sha256=expected_sha256,
+                    expected_byte_size=expected_byte_size,
+                    preserve_temporary=preserve_temporary,
+                )
+
+    def _finalize_temporary_object_locked(
+        self,
+        temporary: TemporaryObjectReference,
+        object_version: PrivateObjectVersionReference,
+        *,
+        expected_sha256: str,
+        expected_byte_size: int,
+        preserve_temporary: bool,
+    ) -> FinalizedObject:
+        temp_key = self._validate_temporary(temporary)
         version_key, destination, manifest_path = self._final_paths(object_version)
         if (type(expected_sha256) is not str or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
                 or type(expected_byte_size) is not int or expected_byte_size < 0):
@@ -757,7 +1100,7 @@ class LocalPrivateAssetStorage:
             # them; current asset-version persistence also requires > 0 bytes.
             raise StorageObjectIncomplete()
 
-        if bound and preserve_temporary:
+        if bound:
             manifest_data = _FINAL_META_V3.pack(
                 _FINAL_MAGIC_V3,
                 UUID(hex=version_key.removeprefix("ver_")).bytes,
@@ -766,12 +1109,6 @@ class LocalPrivateAssetStorage:
                 UUID(hex=temp_key.removeprefix("tmp_")).bytes,
                 inspection.byte_size,
                 bytes.fromhex(inspection.sha256),
-            )
-        elif bound:
-            manifest_data = _FINAL_META_V2.pack(
-                _FINAL_MAGIC_V2, project_id, operation_id,
-                UUID(hex=temp_key.removeprefix("tmp_")).bytes,
-                inspection.byte_size, bytes.fromhex(inspection.sha256),
             )
         else:
             manifest_data = _FINAL_META.pack(
@@ -783,6 +1120,7 @@ class LocalPrivateAssetStorage:
             raise StorageObjectConflict()
         if existing_manifest is None:
             try:
+                self._verify_layout()
                 fd = os.open(
                     manifest_path,
                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
@@ -793,12 +1131,19 @@ class LocalPrivateAssetStorage:
                         raise StorageIOFailure()
                     manifest.flush()
                     os.fsync(manifest.fileno())
+                self._verify_layout()
             except FileExistsError:
                 pass
             except StorageIOFailure:
                 raise
             except OSError:
                 raise StorageIOFailure() from None
+        if existing_manifest is not None and existing_manifest.st_size != len(manifest_data):
+            if existing_manifest.st_size in {
+                _FINAL_META.size, _FINAL_META_V2.size, _FINAL_META_V3.size,
+            }:
+                raise StorageObjectConflict()
+            raise StorageObjectIncomplete()
         current_manifest = self._read_marker(manifest_path, len(manifest_data))
         if current_manifest != manifest_data:
             raise StorageObjectConflict()
@@ -808,7 +1153,9 @@ class LocalPrivateAssetStorage:
             try:
                 # Hard-link creation is atomic and fails if the target exists.
                 # No rename/copy fallback is permitted.
+                self._verify_layout()
                 os.link(source, destination, follow_symlinks=False)
+                self._verify_layout()
             except FileExistsError:
                 pass
             except OSError as exc:
@@ -832,7 +1179,8 @@ class LocalPrivateAssetStorage:
         if not preserve_temporary:
             cleanup_confirmed = True
             try:
-                self.delete_temporary_object(temporary)
+                self._mark_temporary_deleted(temp_key)
+                self._delete_temporary_object_locked(temporary)
             except (StorageCleanupNotConfirmed, StorageIOFailure, StorageInvalidReference):
                 cleanup_confirmed = False
         return FinalizedObject(
@@ -878,13 +1226,55 @@ class LocalPrivateAssetStorage:
         if self._lstat_regular(path, missing_ok=True) is None:
             return True
         try:
+            self._verify_layout()
+            if self._lstat_regular(path, missing_ok=True) is None:
+                return True
             path.unlink()
+            self._verify_layout()
             return self._lstat_regular(path, missing_ok=True) is None
         except OSError:
             return False
 
     def delete_temporary_object(
-        self, reference: TemporaryObjectReference, /
+        self, reference: TemporaryObjectReference, /, *,
+        project_id: UUID | None = None,
+        asset_id: UUID | None = None,
+        intent_id: UUID | None = None,
+        claim_token: UUID | None = None,
+        cleanup_revision: int | None = None,
+        cleanup_generation: int | None = None,
+    ) -> CleanupConfirmation:
+        value = self._validate_temporary(reference)
+        bound = any(value is not None for value in (
+            project_id, asset_id, intent_id, claim_token, cleanup_revision, cleanup_generation
+        ))
+        if bound:
+            if (
+                reference.project_id != project_id
+                or reference.operation_id != intent_id
+                or type(asset_id) is not UUID
+                or type(claim_token) is not UUID
+                or type(cleanup_revision) is not int or cleanup_revision < 0
+                or type(cleanup_generation) is not int or cleanup_generation < 1
+            ):
+                raise StorageInvalidReference()
+        with self._temporary_guard(value, cleanup=True):
+            self._mark_temporary_deleted(value)
+            result = self._delete_temporary_object_locked(reference)
+            if not bound:
+                return result
+            return self._issue_cleanup_confirmation(
+                reference=reference, physically_absent=True,
+                target_kind="temporary_upload", project_id=project_id,
+                cleanup_operation="temporary_object_delete",
+                asset_id=asset_id, intent_id=intent_id, operation_id=intent_id,
+                claim_token=claim_token,
+                cleanup_revision=cleanup_revision,
+                cleanup_generation=cleanup_generation,
+            )
+
+    def _delete_temporary_object_locked(
+        self, reference: TemporaryObjectReference
     ) -> CleanupConfirmation:
         directory = self._temp_dir(reference)
         try:
@@ -901,7 +1291,9 @@ class LocalPrivateAssetStorage:
             for name in expected:
                 if not self._unlink_known(directory / name):
                     raise StorageCleanupNotConfirmed()
+            self._verify_layout()
             directory.rmdir()
+            self._verify_layout()
             if directory.exists() or directory.is_symlink():
                 raise StorageCleanupNotConfirmed()
             return CleanupConfirmation(reference, True)
@@ -911,17 +1303,138 @@ class LocalPrivateAssetStorage:
             raise StorageCleanupNotConfirmed() from None
 
     def delete_finalized_object(
-        self, object_version: PrivateObjectVersionReference, /
+        self, object_version: PrivateObjectVersionReference, /, *,
+        project_id: UUID,
+        asset_id: UUID,
+        intent_id: UUID,
+        claim_token: UUID,
+        cleanup_revision: int,
+        cleanup_generation: int,
+    ) -> CleanupConfirmation:
+        value = self._validate_version(object_version)
+        if (
+            type(project_id) is not UUID or type(asset_id) is not UUID
+            or type(intent_id) is not UUID
+            or type(claim_token) is not UUID
+            or type(cleanup_revision) is not int or cleanup_revision < 0
+            or type(cleanup_generation) is not int or cleanup_generation < 1
+        ):
+            raise StorageCleanupNotConfirmed()
+        with self._version_guard(value, cleanup=True):
+            _key, object_path, manifest_path = self._final_paths(object_version)
+            object_info = self._lstat_regular(object_path, missing_ok=True)
+            manifest_info = self._lstat_regular(manifest_path, missing_ok=True)
+            if object_info is not None and manifest_info is None:
+                # A blob without its provenance manifest cannot authorize
+                # deletion or accounting release.
+                raise StorageCleanupNotConfirmed()
+            if manifest_info is not None:
+                # V2 binds a project and operation, but not the exact
+                # immutable version reference. It is readable for legacy
+                # access but cannot authorize physical deletion.
+                if manifest_info.st_size != _FINAL_META_V3.size:
+                    raise StorageCleanupNotConfirmed()
+                if object_info is not None:
+                    _observed, operation_bytes, project_bytes, _object, _manifest = self._inspect_final(object_version)
+                else:
+                    manifest = self._read_marker(manifest_path, _FINAL_META_V3.size)
+                    magic, version_bytes, project_bytes, operation_bytes, temp_bytes, count, digest = _FINAL_META_V3.unpack(manifest)
+                    try:
+                        expected_version = UUID(hex=value.removeprefix("ver_")).bytes
+                        expected_temp = self._bound_temporary_value(project_id, intent_id)
+                        actual_temp = f"tmp_{UUID(bytes=temp_bytes).hex}"
+                    except (TypeError, ValueError):
+                        raise StorageCleanupNotConfirmed() from None
+                    if (
+                        magic != _FINAL_MAGIC_V3
+                        or version_bytes != expected_version
+                        or actual_temp != expected_temp
+                        or count <= 0
+                        or len(digest) != 32
+                    ):
+                        raise StorageCleanupNotConfirmed()
+                if project_bytes != project_id.bytes or operation_bytes != intent_id.bytes:
+                    raise StorageCleanupNotConfirmed()
+            elif object_info is None:
+                # Idempotent absent/absent success is allowed only after this
+                # exact version has a durable local tombstone.
+                tombstone = self.__locks / f"version-{value.removeprefix('ver_')}.deleted"
+                tombstone_info = self._lstat_regular(tombstone, missing_ok=True)
+                marker = b"Spotloom finalized version deleted v1\n"
+                if (
+                    tombstone_info is None
+                    or self._read_marker(tombstone, len(marker)) != marker
+                ):
+                    raise StorageCleanupNotConfirmed()
+
+            self._mark_version_deleted(value)
+            return self._delete_finalized_object_locked(
+                object_version,
+                project_id=project_id,
+                asset_id=asset_id,
+                intent_id=intent_id,
+                claim_token=claim_token,
+                cleanup_revision=cleanup_revision,
+                cleanup_generation=cleanup_generation,
+                manifest_only=object_info is None and manifest_info is not None,
+                bound=True,
+            )
+
+    def _delete_finalized_object_locked(
+        self, object_version: PrivateObjectVersionReference, /, *,
+        project_id: UUID | None = None,
+        asset_id: UUID | None = None,
+        intent_id: UUID | None = None,
+        claim_token: UUID | None = None,
+        cleanup_revision: int | None = None,
+        cleanup_generation: int | None = None,
+        manifest_only: bool = False,
+        bound: bool | None = None,
     ) -> CleanupConfirmation:
         _key, object_path, manifest_path = self._final_paths(object_version)
         try:
-            if not self._unlink_known(object_path):
+            if bound is None:
+                bound = any(value is not None for value in (
+                    project_id, asset_id, intent_id, claim_token,
+                    cleanup_revision, cleanup_generation,
+                ))
+            if bound and (
+                type(project_id) is not UUID or type(asset_id) is not UUID
+                or type(intent_id) is not UUID or type(claim_token) is not UUID
+                or type(cleanup_revision) is not int or cleanup_revision < 0
+                or type(cleanup_generation) is not int or cleanup_generation < 1
+            ):
                 raise StorageCleanupNotConfirmed()
-            if not self._unlink_known(manifest_path):
+            if not bound:
                 raise StorageCleanupNotConfirmed()
-            if object_path.exists() or manifest_path.exists():
+            if manifest_only:
+                if self._lstat_regular(object_path, missing_ok=True) is not None:
+                    raise StorageCleanupNotConfirmed()
+                if not self._unlink_known(manifest_path):
+                    raise StorageCleanupNotConfirmed()
+            else:
+                if not self._unlink_known(object_path):
+                    raise StorageCleanupNotConfirmed()
+                if not self._unlink_known(manifest_path):
+                    raise StorageCleanupNotConfirmed()
+            if (
+                self._lstat_regular(object_path, missing_ok=True) is not None
+                or self._lstat_regular(manifest_path, missing_ok=True) is not None
+            ):
                 raise StorageCleanupNotConfirmed()
-            return CleanupConfirmation(object_version, True)
+            return self._issue_cleanup_confirmation(
+                reference=object_version,
+                physically_absent=True,
+                target_kind="asset_version",
+                cleanup_operation="finalized_object_delete",
+                project_id=project_id,
+                asset_id=asset_id,
+                intent_id=intent_id,
+                operation_id=intent_id,
+                claim_token=claim_token,
+                cleanup_revision=cleanup_revision,
+                cleanup_generation=cleanup_generation,
+            )
         except (StorageInvalidReference, StorageCleanupNotConfirmed):
             raise StorageCleanupNotConfirmed() from None
         except OSError:

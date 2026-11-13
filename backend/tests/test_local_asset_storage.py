@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import multiprocessing
 import os
 from pathlib import Path
 import subprocess
-from uuid import uuid4
+from dataclasses import replace
+from uuid import UUID, uuid4
 
 import pytest
 
 from adforge_renderer.asset_contract import PrivateObjectVersionReference
 from adforge_renderer.asset_storage_provider import (
+    CleanupConfirmation,
     MAX_STORAGE_CHUNK_BYTES,
     StorageAtomicOperationUnsupported,
     StorageCleanupNotConfirmed,
@@ -27,6 +30,7 @@ from adforge_renderer.local_asset_storage import (
     LocalAssetStorageConfig,
     LocalPrivateAssetStorage,
 )
+import adforge_renderer.local_asset_storage as local_storage_module
 
 
 def make_storage(tmp_path: Path) -> LocalPrivateAssetStorage:
@@ -40,6 +44,38 @@ def store_bytes(storage: LocalPrivateAssetStorage, payload: bytes, *, max_bytes:
         max_bytes=max_bytes,
     )
     return temporary, observation
+
+
+def _cross_process_write(root: str, value: str, project_hex: str, intent_hex: str, entered, release, result) -> None:
+    from uuid import UUID
+
+    storage = LocalPrivateAssetStorage(LocalAssetStorageConfig(Path(root)))
+    reference = TemporaryObjectReference(value, UUID(hex=project_hex), UUID(hex=intent_hex))
+
+    def chunks():
+        entered.set()
+        if release is not None:
+            if not release.wait(10):
+                raise RuntimeError("test writer release timed out")
+        yield b"active writer bytes"
+
+    try:
+        storage.write_temporary_object(reference, chunks(), max_bytes=100)
+        result.put("written")
+    except Exception as exc:
+        result.put(type(exc).__name__)
+
+
+def _cross_process_recreate(root: str, value: str, project_hex: str, intent_hex: str, result) -> None:
+    from uuid import UUID
+
+    storage = LocalPrivateAssetStorage(LocalAssetStorageConfig(Path(root)))
+    reference = TemporaryObjectReference(value, UUID(hex=project_hex), UUID(hex=intent_hex))
+    try:
+        storage.create_temporary_object(reference)
+        result.put("recreated")
+    except Exception as exc:
+        result.put(type(exc).__name__)
 
 
 def test_configuration_requires_explicit_absolute_root_and_rejects_repository_roots(
@@ -127,6 +163,328 @@ def test_project_operation_bound_reference_allocation_is_stable_and_private(tmp_
             foreign_reference, version, expected_sha256=observed.sha256,
             expected_byte_size=observed.byte_size,
         )
+
+
+def test_cross_process_writer_cannot_race_cleanup_or_recreate_deleted_temp(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    root = tmp_path / "private-assets"
+    storage = LocalPrivateAssetStorage(LocalAssetStorageConfig(root))
+    project_id, intent_id = uuid4(), uuid4()
+    reference = storage.allocate_temporary_reference(project_id=project_id, operation_id=intent_id)
+    storage.create_temporary_object(reference)
+    entered = context.Event()
+    release = context.Event()
+    result = context.Queue()
+    writer = context.Process(
+        target=_cross_process_write,
+        args=(str(root), reference.value, project_id.hex, intent_id.hex, entered, release, result),
+    )
+    writer.start()
+    try:
+        assert entered.wait(10), "child writer did not enter its active write"
+        with pytest.raises(StorageCleanupNotConfirmed):
+            storage.delete_temporary_object(reference)
+        # Contended deletion must not claim absence while the child still owns
+        # the OS lock and has not finished producing bytes.
+        assert (root / "temporary" / reference.value / "payload").exists()
+    finally:
+        release.set()
+        writer.join(15)
+        if writer.is_alive():
+            writer.terminate()
+            writer.join(5)
+    assert writer.exitcode == 0
+    assert result.get(timeout=3) == "written"
+    assert storage.delete_temporary_object(reference).physically_absent
+
+    stale_result = context.Queue()
+    stale_writer = context.Process(
+        target=_cross_process_recreate,
+        args=(str(root), reference.value, project_id.hex, intent_id.hex, stale_result),
+    )
+    stale_writer.start()
+    stale_writer.join(15)
+    if stale_writer.is_alive():
+        stale_writer.terminate()
+        stale_writer.join(5)
+    assert stale_writer.exitcode == 0
+    assert stale_result.get(timeout=3) == "StorageObjectConflict"
+    assert not (root / "temporary" / reference.value).exists()
+
+
+def test_cleanup_confirmations_bind_exact_temporary_and_finalized_targets(tmp_path: Path) -> None:
+    storage = make_storage(tmp_path)
+    project_id, asset_id, intent_id = uuid4(), uuid4(), uuid4()
+    temporary = storage.allocate_temporary_reference(project_id=project_id, operation_id=intent_id)
+    storage.create_temporary_object(temporary)
+    storage.write_temporary_object(temporary, [b"proof-bound bytes"], max_bytes=128)
+
+    with pytest.raises(StorageInvalidReference):
+        storage.delete_temporary_object(
+            temporary, project_id=uuid4(), asset_id=asset_id, intent_id=intent_id,
+            claim_token=uuid4(),
+            cleanup_revision=2, cleanup_generation=1,
+        )
+    temp_token = uuid4()
+    temp_confirmation = storage.delete_temporary_object(
+        temporary, project_id=project_id, asset_id=asset_id, intent_id=intent_id,
+        claim_token=temp_token,
+        cleanup_revision=2, cleanup_generation=1,
+    )
+    assert temp_confirmation.physically_absent
+    assert temp_confirmation.target_kind == "temporary_upload"
+    assert temp_confirmation.project_id == project_id
+    assert temp_confirmation.asset_id == asset_id
+    assert temp_confirmation.intent_id == intent_id
+    assert temp_confirmation.operation_id == intent_id
+    assert temp_confirmation.cleanup_revision == 2
+    assert temp_confirmation.cleanup_generation == 1
+    assert storage.verify_cleanup_confirmation(temp_confirmation)
+    assert LocalPrivateAssetStorage(LocalAssetStorageConfig(tmp_path / "private-assets")).verify_cleanup_confirmation(
+        temp_confirmation
+    )
+    assert not storage.verify_cleanup_confirmation(replace(temp_confirmation, project_id=uuid4()))
+    assert not storage.verify_cleanup_confirmation(CleanupConfirmation(
+        reference=temporary, physically_absent=True, target_kind="temporary_upload",
+        project_id=project_id, asset_id=asset_id, intent_id=intent_id,
+        operation_id=intent_id, claim_token=temp_token,
+        cleanup_revision=2, cleanup_generation=1,
+    ))
+
+    # Re-create a fresh operation because temporary deletion is permanently
+    # fenced, then finalize and prove exact version deletion provenance.
+    new_intent_id = uuid4()
+    new_temporary = storage.allocate_temporary_reference(
+        project_id=project_id, operation_id=new_intent_id
+    )
+    storage.create_temporary_object(new_temporary)
+    observed = storage.write_temporary_object(new_temporary, [b"final proof bytes"], max_bytes=128)
+    version = storage.new_object_version_reference()
+    storage.finalize_temporary_object_preserving_temporary(
+        new_temporary, version, expected_sha256=observed.sha256,
+        expected_byte_size=observed.byte_size,
+    )
+    with pytest.raises(StorageCleanupNotConfirmed):
+        storage.delete_finalized_object(
+            version, project_id=project_id, asset_id=asset_id,
+            intent_id=uuid4(), claim_token=uuid4(), cleanup_revision=7,
+            cleanup_generation=1,
+        )
+    assert storage.inspect_finalized_object(version) == observed
+    assert storage.finalize_temporary_object_preserving_temporary(
+        new_temporary, version, expected_sha256=observed.sha256,
+        expected_byte_size=observed.byte_size,
+    ).object_version == version
+    version_token = uuid4()
+    version_confirmation = storage.delete_finalized_object(
+        version, project_id=project_id, asset_id=asset_id,
+        intent_id=new_intent_id, claim_token=version_token,
+        cleanup_revision=7, cleanup_generation=1,
+    )
+    assert version_confirmation.physically_absent
+    assert version_confirmation.target_kind == "asset_version"
+    assert version_confirmation.reference == version
+    assert version_confirmation.project_id == project_id
+    assert version_confirmation.asset_id == asset_id
+    assert version_confirmation.intent_id == new_intent_id
+    assert version_confirmation.cleanup_revision == 7
+    assert version_confirmation.claim_token == version_token
+
+
+def test_finalized_delete_recovers_manifest_after_blob_unlink_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = make_storage(tmp_path)
+    project_id, intent_id, asset_id = uuid4(), uuid4(), uuid4()
+    temporary = storage.allocate_temporary_reference(project_id=project_id, operation_id=intent_id)
+    storage.create_temporary_object(temporary)
+    observed = storage.write_temporary_object(temporary, [b"recover manifest"], max_bytes=128)
+    version = storage.new_object_version_reference()
+    storage.finalize_temporary_object_preserving_temporary(
+        temporary, version, expected_sha256=observed.sha256,
+        expected_byte_size=observed.byte_size,
+    )
+    blob = tmp_path / "private-assets" / "versions" / f"{version.value}.blob"
+    manifest = tmp_path / "private-assets" / "versions" / f"{version.value}.manifest"
+    original_unlink = Path.unlink
+    failed_manifest = False
+
+    def fail_once_on_manifest(path: Path, *args, **kwargs):
+        nonlocal failed_manifest
+        if path == manifest and not failed_manifest:
+            failed_manifest = True
+            raise OSError("injected manifest unlink failure")
+        return original_unlink(path, *args, **kwargs)
+
+    token = uuid4()
+    monkeypatch.setattr(Path, "unlink", fail_once_on_manifest)
+    with pytest.raises(StorageCleanupNotConfirmed):
+        storage.delete_finalized_object(
+            version, project_id=project_id, asset_id=asset_id, intent_id=intent_id,
+            claim_token=token, cleanup_revision=4, cleanup_generation=1,
+        )
+    assert not blob.exists()
+    assert manifest.exists()
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    confirmation = storage.delete_finalized_object(
+        version, project_id=project_id, asset_id=asset_id, intent_id=intent_id,
+        claim_token=token, cleanup_revision=4, cleanup_generation=1,
+    )
+    assert confirmation.physically_absent
+    assert storage.verify_cleanup_confirmation(confirmation)
+    assert not blob.exists() and not manifest.exists()
+
+
+def test_bound_delete_fails_closed_when_blob_remains_without_manifest(tmp_path: Path) -> None:
+    storage = make_storage(tmp_path)
+    project_id, intent_id, asset_id = uuid4(), uuid4(), uuid4()
+    temporary = storage.allocate_temporary_reference(project_id=project_id, operation_id=intent_id)
+    storage.create_temporary_object(temporary)
+    observed = storage.write_temporary_object(temporary, [b"preserve uncertain blob"], max_bytes=128)
+    version = storage.new_object_version_reference()
+    storage.finalize_temporary_object_preserving_temporary(
+        temporary, version, expected_sha256=observed.sha256,
+        expected_byte_size=observed.byte_size,
+    )
+    root = tmp_path / "private-assets" / "versions"
+    blob = root / f"{version.value}.blob"
+    (root / f"{version.value}.manifest").unlink()
+    with pytest.raises(StorageCleanupNotConfirmed):
+        storage.delete_finalized_object(
+            version, project_id=project_id, asset_id=asset_id, intent_id=intent_id,
+            claim_token=uuid4(), cleanup_revision=2, cleanup_generation=1,
+        )
+    assert blob.exists()
+
+
+def test_temporary_tombstone_blocks_new_finalization_but_allows_exact_existing_retry(
+    tmp_path: Path,
+) -> None:
+    storage = make_storage(tmp_path)
+    project_id, intent_id = uuid4(), uuid4()
+    temporary = storage.allocate_temporary_reference(project_id=project_id, operation_id=intent_id)
+    storage.create_temporary_object(temporary)
+    observed = storage.write_temporary_object(temporary, [b"already finalized"], max_bytes=128)
+    version = storage.new_object_version_reference()
+    storage.finalize_temporary_object(
+        temporary, version, expected_sha256=observed.sha256,
+        expected_byte_size=observed.byte_size,
+    )
+    # The original finalization cleaned and tombstoned the temp reference.
+    retry = storage.finalize_temporary_object(
+        temporary, version, expected_sha256=observed.sha256,
+        expected_byte_size=observed.byte_size,
+    )
+    assert retry.object_version == version
+    preserving_retry = storage.finalize_temporary_object_preserving_temporary(
+        temporary, version, expected_sha256=observed.sha256,
+        expected_byte_size=observed.byte_size,
+    )
+    assert preserving_retry.object_version == version
+
+    new_intent = uuid4()
+    tombstoned = storage.allocate_temporary_reference(project_id=project_id, operation_id=new_intent)
+    storage.create_temporary_object(tombstoned)
+    assert storage.delete_temporary_object(tombstoned).physically_absent
+    new_version = storage.new_object_version_reference()
+    with pytest.raises(StorageObjectConflict):
+        storage.finalize_temporary_object(
+            tombstoned, new_version, expected_sha256="a" * 64, expected_byte_size=12,
+        )
+    with pytest.raises(StorageObjectConflict):
+        storage.finalize_temporary_object_preserving_temporary(
+            tombstoned, new_version, expected_sha256="a" * 64, expected_byte_size=12,
+        )
+    assert not (tmp_path / "private-assets" / "versions" / f"{new_version.value}.blob").exists()
+
+
+def test_version_manifest_cannot_be_rebound_to_a_different_version(tmp_path: Path) -> None:
+    storage = make_storage(tmp_path)
+    project_id, intent_id, asset_id = uuid4(), uuid4(), uuid4()
+    temporary = storage.allocate_temporary_reference(project_id=project_id, operation_id=intent_id)
+    storage.create_temporary_object(temporary)
+    observed = storage.write_temporary_object(temporary, [b"version-bound manifest"], max_bytes=128)
+    original = storage.new_object_version_reference()
+    storage.finalize_temporary_object_preserving_temporary(
+        temporary, original, expected_sha256=observed.sha256,
+        expected_byte_size=observed.byte_size,
+    )
+    substituted = storage.new_object_version_reference()
+    root = tmp_path / "private-assets" / "versions"
+    (root / f"{substituted.value}.blob").write_bytes((root / f"{original.value}.blob").read_bytes())
+    (root / f"{substituted.value}.manifest").write_bytes((root / f"{original.value}.manifest").read_bytes())
+    with pytest.raises(StorageObjectIncomplete):
+        storage.delete_finalized_object(
+            substituted, project_id=project_id, asset_id=asset_id, intent_id=intent_id,
+            claim_token=uuid4(), cleanup_revision=3, cleanup_generation=1,
+        )
+    assert (root / f"{substituted.value}.blob").exists()
+    assert (root / f"{substituted.value}.manifest").exists()
+
+
+def test_legacy_v2_manifest_is_readable_but_cannot_authorize_version_deletion(tmp_path: Path) -> None:
+    storage = make_storage(tmp_path)
+    project_id, intent_id, asset_id = uuid4(), uuid4(), uuid4()
+    temporary = storage.allocate_temporary_reference(project_id=project_id, operation_id=intent_id)
+    version = storage.new_object_version_reference()
+    payload = b"legacy v2 is not exact-version evidence"
+    digest = hashlib.sha256(payload).digest()
+    version_root = tmp_path / "private-assets" / "versions"
+    (version_root / f"{version.value}.blob").write_bytes(payload)
+    temp_id = UUID(hex=temporary.value.removeprefix("tmp_")).bytes
+    manifest = local_storage_module._FINAL_META_V2.pack(
+        local_storage_module._FINAL_MAGIC_V2,
+        project_id.bytes,
+        intent_id.bytes,
+        temp_id,
+        len(payload),
+        digest,
+    )
+    # V2 is version-unbound even if copied into a valid opaque version path.
+    (version_root / f"{version.value}.manifest").write_bytes(manifest)
+    legacy_observation = storage.inspect_finalized_object(version)
+    assert legacy_observation.byte_size == len(payload)
+    assert legacy_observation.sha256 == digest.hex()
+    with pytest.raises(StorageCleanupNotConfirmed):
+        storage.delete_finalized_object(
+            version, project_id=project_id, asset_id=asset_id,
+            intent_id=intent_id, claim_token=uuid4(),
+            cleanup_revision=1, cleanup_generation=1,
+        )
+    assert (version_root / f"{version.value}.blob").exists()
+    assert (version_root / f"{version.value}.manifest").exists()
+
+
+def test_lock_directory_replacement_fails_closed_before_cleanup(tmp_path: Path) -> None:
+    storage = make_storage(tmp_path)
+    temporary, _observed = store_bytes(storage, b"do not unlink after lock dir swap")
+    lock_dir = tmp_path / "private-assets" / "temporary-locks"
+    displaced = tmp_path / "private-assets" / "temporary-locks-original"
+    lock_dir.rename(displaced)
+    lock_dir.mkdir()
+    with pytest.raises(StorageIOFailure):
+        storage.delete_temporary_object(temporary)
+    payload = tmp_path / "private-assets" / "temporary" / temporary.value / "payload"
+    assert payload.exists()
+
+
+def test_lock_acquisition_failure_does_not_claim_absence_or_delete_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = make_storage(tmp_path)
+    temporary, _observed = store_bytes(storage, b"lock failure is fail closed")
+    original_open = local_storage_module.os.open
+
+    def fail_lock_open(path, flags, *args, **kwargs):
+        if Path(path).parent.name == "temporary-locks" and str(path).endswith(".lock"):
+            raise PermissionError("injected lock acquisition failure")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(local_storage_module.os, "open", fail_lock_open)
+    with pytest.raises(StorageCleanupNotConfirmed):
+        storage.delete_temporary_object(temporary)
+    payload = tmp_path / "private-assets" / "temporary" / temporary.value / "payload"
+    assert payload.exists()
 
 
 def test_recovery_finalization_preserves_both_objects_and_is_idempotent(
@@ -474,7 +832,6 @@ def test_unsupported_atomic_finalization_fails_closed_without_rename_fallback(
         )
     assert str(tmp_path) not in str(error.value)
     assert not (tmp_path / "private-assets" / "versions" / f"{version.value}.blob").exists()
-    assert storage.delete_finalized_object(version).physically_absent
     assert storage.inspect_temporary_object(temporary).complete
 
 
@@ -498,14 +855,22 @@ def test_temporary_and_final_cleanup_are_idempotent_and_confirm_absence(tmp_path
     assert storage.delete_temporary_object(temporary).physically_absent
     assert storage.delete_temporary_object(temporary).physically_absent
 
-    temporary, observation = store_bytes(storage, b"final cleanup")
+    project_id, asset_id, intent_id = uuid4(), uuid4(), uuid4()
+    temporary = storage.allocate_temporary_reference(project_id=project_id, operation_id=intent_id)
+    storage.create_temporary_object(temporary)
+    observation = storage.write_temporary_object(temporary, [b"final cleanup"], max_bytes=128)
     version = storage.new_object_version_reference()
-    storage.finalize_temporary_object(
+    storage.finalize_temporary_object_preserving_temporary(
         temporary, version, expected_sha256=observation.sha256,
         expected_byte_size=observation.byte_size,
     )
-    assert storage.delete_finalized_object(version).physically_absent
-    assert storage.delete_finalized_object(version).physically_absent
+    claim = uuid4()
+    delete_args = dict(
+        project_id=project_id, asset_id=asset_id, intent_id=intent_id,
+        claim_token=claim, cleanup_revision=1, cleanup_generation=1,
+    )
+    assert storage.delete_finalized_object(version, **delete_args).physically_absent
+    assert storage.delete_finalized_object(version, **delete_args).physically_absent
     with pytest.raises(StorageObjectMissing):
         storage.open_exact_version(version)
 
@@ -573,7 +938,10 @@ def test_windows_junction_replacement_fails_closed(tmp_path: Path) -> None:
 def test_windows_hardlink_finalization_is_create_only_and_cleans_inside_root(tmp_path: Path) -> None:
     storage = make_storage(tmp_path)
     payload = b"Windows create-only finalization"
-    temporary, observed = store_bytes(storage, payload)
+    project_id, asset_id, intent_id = uuid4(), uuid4(), uuid4()
+    temporary = storage.allocate_temporary_reference(project_id=project_id, operation_id=intent_id)
+    storage.create_temporary_object(temporary)
+    observed = storage.write_temporary_object(temporary, [payload], max_bytes=128)
     version = storage.new_object_version_reference()
     result = storage.finalize_temporary_object(
         temporary, version, expected_sha256=observed.sha256,
@@ -593,7 +961,10 @@ def test_windows_hardlink_finalization_is_create_only_and_cleans_inside_root(tmp
             expected_byte_size=other_observation.byte_size,
         )
     assert final_path.read_bytes() == payload
-    assert storage.delete_finalized_object(version).physically_absent
+    assert storage.delete_finalized_object(
+        version, project_id=project_id, asset_id=asset_id, intent_id=intent_id,
+        claim_token=uuid4(), cleanup_revision=1, cleanup_generation=1,
+    ).physically_absent
     assert not final_path.exists()
 
 
@@ -602,4 +973,8 @@ def test_missing_directory_or_bad_reference_never_triggers_sweeping(tmp_path: Pa
     unknown = TemporaryObjectReference("tmp_" + "0" * 32)
     assert storage.delete_temporary_object(unknown).physically_absent
     with pytest.raises(StorageInvalidReference):
-        storage.delete_finalized_object(PrivateObjectVersionReference(value="../outside"))
+        storage.delete_finalized_object(
+            PrivateObjectVersionReference(value="../outside"),
+            project_id=uuid4(), asset_id=uuid4(), intent_id=uuid4(),
+            claim_token=uuid4(), cleanup_revision=1, cleanup_generation=1,
+        )
